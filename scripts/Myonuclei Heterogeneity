@@ -1,0 +1,476 @@
+### Myonuclei exploration
+library(Seurat)
+library(ggplot2)
+library(viridis)
+library('org.Hs.eg.db')
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(tidyr)
+library(ggnewscale)
+library(psycho)
+library(parameters)
+library(effectsize)
+library(RColorBrewer)
+library(hypeR)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(plyr)
+library(gridExtra)
+library(dplyr)
+library(UpSetR)
+library(ggbreak)
+library(limma)
+library(plotrix)
+library(patchwork)
+library(SingleCellExperiment)
+library(UpSetR)
+library(data.table)
+library(Hmisc)
+library(fmsb)
+library(fgsea)
+library(GSEABase)
+library(grid)
+library(harmony)
+library(corrplot)
+library(WGCNA)
+library(TMSig)
+library(readxl)
+
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data")
+
+
+my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 10, angle =45, hjust = 1),
+                                    axis.text.y = element_text(colour = "black", size = 10),
+                                    axis.title.x = element_text(colour = "black", size = 10),
+                                    axis.title.y = element_text(colour = "black", size = 10),
+)
+
+
+seurat <- readRDS('Integration/Points.harmony.sct.RDS')
+
+
+
+Idents(seurat) = seurat$CellType2
+
+levels <- c('EGF+ Myonuclei', 'MYH7B+ Myonuclei', 'CKM+ Myonuclei', 'MuSC', 'FAP', 'SMC/Pericytes', 'EC', 'Immune')
+levels(seurat) <- levels
+
+DefaultAssay(object = seurat) <- "filtered"
+seurat <- NormalizeData(seurat)
+all.genes <- rownames(seurat)
+seurat <- ScaleData(seurat, features = all.genes)
+
+####Subset with all myonuclei
+Myo <- subset(seurat, idents = c('CKM+ Myonuclei', 'EGF+ Myonuclei', 'MYH7B+ Myonuclei'))
+
+###Run TMSig ORA on myonuclei populations
+EGF_Myo <- FindMarkers(seurat, ident.1 = "EGF+ Myonuclei", ident.2 = c("CKM+ Myonuclei", "MYH7B+ Myonuclei"), min.pct = 0.1,  logfc.threshold = 0.25, only.pos = FALSE)
+write.csv(EGF_Myo, 'Myonuclei_exploration/EGF_Myo_DEGS.csv')
+
+CKM_Myo <- FindMarkers(seurat, ident.1 = "CKM+ Myonuclei", ident.2 = c("EGF+ Myonuclei", "MYH7B+ Myonuclei"), min.pct = 0.1,  logfc.threshold = 0.25, only.pos = FALSE)
+write.csv(CKM_Myo, 'Myonuclei_exploration/CKM_Myo_DEGS.csv')
+
+MYH7BMyo <- FindMarkers(seurat, ident.1 = "MYH7B+ Myonuclei", ident.2 = c("CKM+ Myonuclei", "EGF+ Myonuclei"), min.pct = 0.1,  logfc.threshold = 0.25, only.pos = FALSE)
+write.csv(MYH7BMyo, 'Myonuclei_exploration/MYH7B_Myo_DEGS.csv')
+
+EGFvMYH7B <- FindMarkers(seurat, ident.1 = "EGF+ Myonuclei", ident.2 = c("MYH7B+ Myonuclei"), min.pct = 0.1,  logfc.threshold = 0.25, only.pos = FALSE)
+write.csv(EGFvMYH7B, 'Myonuclei_exploration/EGFvMYH7B_DEGS.csv')
+
+
+EGF_Myo <- read.csv('Myonuclei_exploration/EGF_Myo_DEGS.csv', row.names = 1)
+CKM_Myo <- read.csv('Myonuclei_exploration/CKM_Myo_DEGS.csv', row.names = 1)
+MYH7B_Myo <- read.csv('Myonuclei_exploration/MYH7b_Myo_DEGS.csv', row.names = 1)
+EGFvMYH7B <- read.csv('Myonuclei_exploration/EGFvMYH7B_DEGS.csv', row.names = 1)
+
+###Get background information
+df1 <- read.csv('GroupDegs/Pseudobulk DEG/normalized.counts.EGF.csv')
+df2 <- read.csv('GroupDegs/Pseudobulk DEG/normalized.counts.Myonuclei.csv')
+df3 <- read.csv('GroupDegs/Pseudobulk DEG/normalized.counts.MYH7B.csv')
+
+upregulated <- function(df, logfc){
+  df <- df  %>% dplyr::select(2, 5)
+  df <- subset(df, df$p_val_adj < 0.05 & df$avg_log2FC > logfc)
+  df <- df[order(-df$avg_log2FC),] 
+  return(df)
+}
+
+downregulated <- function(df, logfc){
+  df <- df  %>% dplyr::select(2, 5)
+  df <- subset(df, df$p_val_adj < 0.05 & df$avg_log2FC < logfc)
+  df <- df[order(-df$avg_log2FC),] 
+  return(df)
+}
+
+
+EGF_Up <- upregulated(df = EGF_Myo, logfc = 1)
+EGF_Up_Genes <- rownames(EGF_Up)
+
+EGF_Down <- downregulated(df = EGF_Myo, logfc = -1)
+EGF_Down_Genes <- rownames(EGF_Down)
+
+CKM_Myo_Up <- upregulated(df = CKM_Myo, logfc = 1)
+CKM_Myo_Up_Genes <- rownames(CKM_Myo_Up)
+
+CKM_Myo_Down <- downregulated(df = CKM_Myo, logfc = -1)
+CKM_Myo_Down_Genes <- rownames(CKM_Myo_Down)
+
+MYH7B_Myo_Up <- upregulated(df = MYH7B_Myo, logfc = 1)
+MYH7B_Myo_Up_Genes <- rownames(MYH7B_Myo_Up)
+
+MYH7B_Myo_down <- downregulated(df = MYH7B_Myo, logfc = -1)
+MYH7B_Myo_down_Genes <- rownames(MYH7B_Myo_down)
+
+
+EGFvMYH7B_Up <- upregulated(df = EGFvMYH7B, logfc = 1)
+EGFvMYH7B_Up_Genes <- rownames(EGFvMYH7B_Up)
+
+EGFvMYH7B_Down <- downregulated(df = EGFvMYH7B, logfc = -1)
+EGFvMYH7B_Down_Genes <- rownames(EGFvMYH7B_Down)
+
+backgroundEGF <- df1$X
+backgroundCKM <- df2$X
+backgroundMYH7B <- df3$X
+background <- unique(c(backgroundEGF, backgroundCKM, backgroundMYH7B))
+
+###run pathway analyses using TMsig 
+##Load GO:BP pathays from MsigDB
+geneSets <- gmtPathways('MsigDB/c5.go.bp.v2024.1.Hs.symbols.gmt')
+length(geneSets) 
+
+# Filter by size - no background
+# Restrict genes sets to background of genes
+##Will need to repeat this for each celltype
+geneSetsFilt <- filterSets(
+  x = geneSets, 
+  background = background,
+  min_size = 10L # min. overlap of each set with background
+)
+
+length(geneSetsFilt) 
+
+# Calculate proportion of overlap with background
+setSizes <- lengths(geneSetsFilt)
+setSizesOld <- lengths(geneSets)[names(geneSetsFilt)]
+overlapProp <- setSizes / setSizesOld
+
+plot(setSizesOld, overlapProp, main = "Set Size vs. Overlap")
+table(overlapProp >= 0.8)
+
+geneSetsFilt <- geneSetsFilt[overlapProp >= 0.8]
+length(geneSetsFilt) 
+
+#Incidence Matrix
+imat <- sparseIncidence(x = geneSetsFilt)
+dim(imat) 
+
+imat[seq_len(8L), seq_len(5L)]
+# Calculate sizes of all pairwise intersections
+tcrossprod(imat)[1:3, 1:3]
+crossprod(imat)[1:3, 1:3]
+
+#Set similarity
+##Jaacard
+jaccard <- similarity(x = geneSetsFilt)
+dim(jaccard)
+class(jaccard)
+
+
+##Cluster similar sets
+# clusterSets with default arguments
+clusterDF <- clusterSets(x = geneSetsFilt, 
+                         type = "jaccard", 
+                         cutoff = 0.85, 
+                         method = "complete",
+                         h = 0.9)
+
+# First 4 clusters with 2 or more sets
+subset(clusterDF, subset = cluster <= 4L)
+
+##In each cluster, a single set can be retained for analysis using a combination of criteria such as set size, 
+#overlap proportion, or length of the description (shorter descriptions tend to be more general terms).
+
+## Use clusterSets output to select sets to retain for analysis
+clusterDF$overlap_prop <- overlapProp[clusterDF$set] # overlap proportion
+clusterDF$n_char <- nchar(clusterDF$set) # length of set description
+
+# Reorder rows so that the first set in each cluster is the one to keep
+o <- with(clusterDF, 
+          order(cluster, set_size, overlap_prop, n_char, set,
+                decreasing = c(FALSE, TRUE, TRUE, FALSE, TRUE),
+                method = "radix"))
+clusterDF <- clusterDF[o, ]
+
+subset(clusterDF, cluster <= 4L) # show first 4 cluste
+
+
+# Sets to keep for analysis
+keepSets <- with(clusterDF, set[!duplicated(cluster)])
+head(keepSets, 4L)
+
+
+# Subset geneSetsFilt to those sets
+geneSetsFilt <- geneSetsFilt[keepSets]
+length(geneSetsFilt) 
+
+##run ORA on hypeR
+M1 <- hypeR(EGF_Up_Genes, geneSetsFilt, test="hypergeometric", background = background, absolute = FALSE, pval = 0.05)
+hyp_dots(M1 , merge=TRUE, top = 25, pval = 0.05) 
+
+M2 <- hypeR(CKM_Myo_Up_Genes, geneSetsFilt, test="hypergeometric", background = background, absolute = FALSE, pval = 0.05)
+hyp_dots(M2 , merge=TRUE, top = 25, pval = 0.05) 
+
+M3 <- hypeR(MYH7B_Myo_Up_Genes, geneSetsFilt, test="hypergeometric", background = background, absolute = FALSE, pval = 0.05)
+hyp_dots(M3 , merge=TRUE, top = 25, pval = 0.05) 
+
+M4 <- hypeR(EGFvMYH7B_Up_Genes, geneSetsFilt, test="hypergeometric", background = background, absolute = FALSE, pval = 0.05)
+hyp_dots(M4 , merge=TRUE, top = 25, pval = 0.05) 
+
+M5 <- hypeR(EGFvMYH7B_Down_Genes, geneSetsFilt, test="hypergeometric", background = background, absolute = FALSE, pval = 0.05)
+hyp_dots(M5 , merge=TRUE, top = 25, pval = 0.05) 
+
+
+hyp_to_excel(M1, file_path='Myonuclei_exploration/ORA after TMsig/EGF.pos.BP.logfc1.xlsx')
+hyp_to_excel(M2, file_path='Myonuclei_exploration/ORA after TMsig/CKM.pos.BP.logfc1.xlsx')
+hyp_to_excel(M3, file_path='Myonuclei_exploration/ORA after TMsig/MYH7B.pos.BP.logfc1.xlsx')
+hyp_to_excel(M4, file_path='Myonuclei_exploration/ORA after TMsig/EGFVMYH7B.pos.BP.logfc1.xlsx')
+hyp_to_excel(M5, file_path='Myonuclei_exploration/ORA after TMsig/EGFVMYH7B.neg.BP.logfc1.xlsx')
+
+EGF_BP_pos <- read_excel('Myonuclei_exploration/ORA after TMsig/EGF.pos.BP.logfc1.xlsx')
+CKM_BP_pos <- read_excel('Myonuclei_exploration/ORA after TMsig/CKM.pos.BP.logfc1.xlsx')
+MYH7B_BP_pos <- read_excel('Myonuclei_exploration/ORA after TMsig/MYH7B.pos.BP.logfc1.xlsx')
+
+
+get_labels <- function(df){
+  df <- subset(df, df$fdr < 0.05)
+  labels <- df$label[1:4]
+  return(labels)
+}
+
+process_neg <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- subset(df, df$fdr < 0.05)
+  df <- df[df$label %in% labels, ]
+  df$log10fdr <- log10(df$fdr)
+  return(df)
+}
+
+process_pos <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- subset(df, df$fdr < 0.05)
+  df <- df[df$label %in% labels, ]
+  df$log10fdr <- -log10(df$fdr)
+  return(df)
+}
+
+labels1 <- get_labels(EGF_BP_pos)
+labels2 <- get_labels(CKM_BP_pos )
+labels3 <- get_labels(MYH7B_BP_pos)
+
+labels <- unique(c(labels1, labels2, labels3))
+labels <- labels[!is.na(labels)]
+
+
+EGF_BP_pos <- process_pos(EGF_BP_pos, 'EGF+ Myonuclei', 'pos', labels)
+CKM_BP_pos <- process_pos(CKM_BP_pos, 'CKM+ Myonuclei', 'pos', labels)
+MYH7B_BP_pos <- process_pos(MYH7B_BP_pos, 'MYH7B+ Myonuclei', 'pos', labels)
+
+mega <- rbind(EGF_BP_pos, CKM_BP_pos, MYH7B_BP_pos)
+
+
+levels2 <- c('EGF+ Myonuclei', 'MYH7B+ Myonuclei', 'CKM+ Myonuclei')
+mega$CellType <- factor(mega$CellType, levels = levels2)
+mega$label <- factor(mega$label, levels = labels)
+
+
+mega$label <- gsub("_", ' ', mega$label)
+mega$label <- gsub('GOBP', '', mega$label)
+mega$label <- tolower(mega$label)
+mega$label <- toTitleCase(mega$label)
+mega$label <- gsub('gobp', '', mega$label)
+mega$label <- gsub('Rna', 'RNA', mega$label)
+mega$label <- gsub('Dna', 'DNA', mega$label)
+mega$label <- gsub('Ii', 'II', mega$label)
+
+labels <- gsub("_", ' ', labels)
+labels <- gsub('GOBP', '', labels)
+labels <- tolower(labels)
+labels <- toTitleCase(labels)
+labels <- gsub('gobp', '', labels)
+labels <- gsub('Rna', 'RNA', labels)
+labels <- gsub('Dna', 'DNA', labels)
+labels <- gsub('Ii', 'II', labels)
+
+mega$label <- factor(mega$label, levels = labels)
+
+##Remove generic terms that don't add much substance 
+remove <- c( ' Muscle System Process', ' Circulatory System Process')
+mega2 <- mega[! mega$label %in% remove, ]
+
+plot2 <- ggplot(data = mega2, aes(x = CellType, y = label, size = overlap, colour = log10fdr)) +
+  geom_point() +
+  scale_colour_gradientn(colours = rev(brewer.pal(n =3, name = 'YlOrRd'))) +
+ my_theme +
+  labs(x = '', y = '') +
+  scale_y_discrete(labels = function(y) str_wrap(y, width = 40))
+plot2
+
+
+
+ggsave(
+  filename = "Figures/myonuclei.pathways.pdf",
+  plot = plot2,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 12,
+  height = 12,
+  units = c("cm"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+
+##subset just CKM myonuclei and classify them as TypeI, IIA and IIx based on MYH expression
+#Calculate Type I and Type II score to classify each of them. Next, calculate Type IIa and Type IIx scores to further discriminate Type II fiber types
+Myo <- subset(seurat, idents = c('CKM+ Myonuclei'))
+
+
+Myo$scoreI  <- PercentageFeatureSet(object = Myo, pattern = "MYH7")
+Myo$scoreII  <- PercentageFeatureSet(object = Myo, pattern = "MYH1|MYH2")
+Myo$scoreIIa  <- PercentageFeatureSet(object = Myo, pattern  = "MYH2")
+Myo$scoreIIx  <- PercentageFeatureSet(object = Myo, pattern = "MYH1")
+
+I <- Myo$scoreI
+II <- Myo$scoreII
+IIa <- Myo$scoreIIa
+IIx <- Myo$scoreIIx
+
+Myo$IorII <- I/II #if greater than 1 more TypeI than TypeII
+Myo$IIclass <- IIx/IIa #if greater than 1 more IIx than IIa
+Myo$fiber_class <- Myo@meta.data$CellType2
+
+i <- 1
+for(i in 1:length(rownames(Myo@meta.data))){
+  x <- Myo@meta.data$IorII[i]
+  z <- Myo@meta.data$scoreIIa[i]
+  y <- Myo@meta.data$IIclass[i]
+  if(x == "NaN"){
+    Myo@meta.data$fiber_class[i] <- "Unknown MF" ##if values are NaN identifies as unknwon
+  }else if(x == "Inf"){
+    Myo@meta.data$fiber_class[i] <- "Pure Type I"  #if value is infinity identifies as pure TypeI
+  }else if(x > 1){
+    if(z < 1){
+      Myo@meta.data$fiber_class[i] <- "Type I" #If x(I/II) is greater than 1 checks if score IIa is less than 1 and if so assigns as TypeI
+    }else{
+      Myo@meta.data$fiber_class[i] <- "Hybrid I/IIa" ##If scoreIIa greater than 1 assigns it is as hybird I/IIa
+    }
+  }else{ ##If IorII is not greater than 1 (less than 1) it will be a typeII fibers
+    if(y == "NaN"){
+      Myo@meta.data$fiber_class[i] <- "Unknown II" ##if the ratio between IIx/IIa is NAN it classifies as unknown II
+    }else if(y == "Inf"){
+      Myo@meta.data$fiber_class[i] <- "Pure Type IIx" ##If IIX/IIa is infinite it assigns it pure IIx
+    }else if(y == 0){
+      Myo@meta.data$fiber_class[i] <- "Type IIa" ##If IIx/IIa is 0 it is assigned pure IIa changed from pure IIa
+    }else if(y > 1.25){
+      Myo@meta.data$fiber_class[i] <- "Type IIx" ##If IIX/IIA is greater than 1.25 it assigns it typeIIx
+    }else if(y < 0.75){
+      Myo@meta.data$fiber_class[i] <- "Type IIa" ##If IIx/IIa is less than 0.75 it assigns it TypeIIa
+    }else if(y < 1.25 & y > 0.75){
+      Myo@meta.data$fiber_class[i]  <- "Hybrid IIa/IIx" #If IIX/IIa is between 0.75 and 1.25 it is hybird IIA/IIx
+    }else{
+      Myo@meta.data$fiber_class[i] <- "Unknown II-subtype" #If is doesn't meet any of these criteria, it is unknown subtype IIa
+    }
+  }
+}
+
+
+x <- Idents(Myo)
+Idents(Myo) <- Myo$fiber_class
+cell_number <- table(Idents(Myo), Myo$orig.ident)
+write.table(cell_number, file = "Myonuclei_exploration/Myonuclei_class_just MYH.txt", sep = "\t")
+sum(cell_number)
+unique(Myo@meta.data$fiber_class)
+
+levels <- c('Type I', 'Hybrid I/IIa', 'Type IIa', 'Hybrid IIa/IIx', 'Type IIx')
+levels(Myo) <- levels
+
+# Reorder factor levels for fiber_class
+Myo$fiber_class <- factor(Myo$fiber_class, levels = c("Type I", "Hybrid I/IIa", "Type IIa", "Hybrid IIa/IIx", "Type IIx"))
+cols <- c('#00FFFF', "#80B3B3", '#FF6666', '#CB5933', "#964B00")
+
+Myo2 <- subset(Myo, subset = UMAP_2 <= 2)
+
+# Generate the UMAP plot with correct order
+plot3 <- DimPlot(Myo2, 
+        pt.size = 0.01, 
+        label = FALSE, 
+        label.size = 7, 
+        split.by = 'fiber_class', 
+        reduction = "umap", 
+        cols = cols) +
+  theme(
+    text = element_text(size = 10),
+    strip.text = element_text(size = 10),  # Increase facet title size
+    aspect.ratio = 1
+  ) + NoLegend()
+
+
+
+DimPlot(Myo, pt.size = 0.1, label = FALSE, label.size = 7, split.by = 'fiber_class', reduction = "umap", cols = cols) +
+  theme(text = element_text(size=20)) 
+
+##plot single cell heatmap of myosin heavy chain expression
+MYH <- c('MYH7', 'MYH2', 'MYH1')
+
+plot4 <- DoHeatmap(
+  Myo,
+  features = MYH,
+  cells = NULL,
+  group.by = "fiber_class",
+  group.bar = TRUE,
+  group.colors = cols,
+  disp.min = -2.5,
+  disp.max = NULL,
+  slot = "scale.data",
+  assay = "filtered",
+  label = FALSE,
+  size = 3.5,
+  hjust = 0,
+  angle = 0,
+  raster = TRUE,
+  draw.lines = TRUE,
+  lines.width = NULL,
+  group.bar.height = 0.05,
+  combine = TRUE) +
+  theme(axis.text.y = element_text(colour = "black", size = 10),
+    legend.position = "right"  # Keep expression legend
+  ) +
+  guides(fill = guide_colorbar(), color = "none")  # Remove fiber_class (Identity) legend
+
+
+plot34 <- ggarrange(plot3, plot4, nrow = 2, ncol = 1)
+
+
+ggsave(
+  filename = "Figures/MYH.traditional.pdf",
+  plot = plot34,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 15,
+  height = 10,
+  units = c("cm"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
