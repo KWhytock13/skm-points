@@ -1,0 +1,616 @@
+###Kendall correlation with Rd/I and pathway analyses
+library("WGCNA")
+library("dplyr")
+library('tidyverse')
+library(stats)
+library(hypeR)
+library(stringr)
+library(SummarizedExperiment)
+library(tidyr)
+library(testit)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+library(plotrix)
+library(Hmisc)
+library(readxl)
+library(tools)
+library(RColorBrewer)
+library(UpSetR)
+library(ComplexHeatmap)
+library(viridis)
+library(patchwork)
+library(TMSig)
+library(fgsea)
+library(tools)
+
+my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 10, angle =45, hjust = 1),
+                                    axis.text.y = element_text(colour = "black", size = 10),
+                                    axis.title.x = element_text(colour = "black", size = 10),
+                                    axis.title.y = element_text(colour = "black", size = 10),
+)
+
+
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data")
+###Load data that has glycemic index
+clinical_data <- read.csv('~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data/clinical/Points.clinical.data_glycemic.csv')
+names(clinical_data)[names(clinical_data) == "PID"] <- "Sample"
+rownames(clinical_data) <- clinical_data$Sample
+
+##subset to dependent variable, this was also repeated for HOMA2-IR
+clinical_data <- clinical_data[, colnames(clinical_data) %in% c('Sample', "RdSS2kgFFMInsulin_Pre")]
+
+##get variance of Rd/I
+sd_value <- sd(clinical_data$RdSS2kgFFMInsulin_Pre, na.rm = TRUE)
+var_value <- var(clinical_data$RdSS2kgFFMInsulin_Pre, na.rm = TRUE)
+cv <- sd(clinical_data$RdSS2kgFFMInsulin_Pre, na.rm = TRUE) / mean(clinical_data$RdSS2kgFFMInsulin_Pre, na.rm = TRUE)
+100 * cv ##cv percent
+
+range_value <- range(clinical_data$RdSS2kgFFMInsulin_Pre, na.rm = TRUE)
+diff(range_value)  # diff_range #min max
+0.18255951 -0.03583883 #fold change
+
+
+###Load pseudobulk RNA-Seq data. 
+##Columns should be samples, rows should be genes
+##data has already been filtered for low expressing genes, no more filtering required
+##run for each cell type
+normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.Immune.csv", row.names = 1)
+normalized_counts[1:6, 1:6]
+dim(normalized_counts)
+
+CellType <- 'Immune'
+
+###make sure trait data order matches with counts order
+column_order <- colnames(normalized_counts)
+clinical_data <- clinical_data[column_order,]
+
+# Apply cor.test to each gene (row) in the gene expression matrix
+cor_results <- apply(normalized_counts, 1, function(gene_expr_values) {
+  cor.test(gene_expr_values, clinical_data$RdSS2kgFFMInsulin_Pre, method = 'kendall')  # Perform correlation test
+})
+
+# View results for the first gene
+cor_results[[1]]
+
+
+# Extract correlation coefficients and p-values
+cor_coeffs <- sapply(cor_results, function(res) res$estimate)  #  correlation coefficient
+p_values <- sapply(cor_results, function(res) res$p.value)    # p-values
+
+# Combine results into a data frame
+correlation_df <- data.frame(
+  Gene = rownames(normalized_counts),
+  tau = cor_coeffs,
+  P_value = p_values
+)
+
+head(correlation_df)
+
+write.csv(correlation_df, file=paste0('Correlation/', CellType,  '.kendall.correlation.csv'))
+
+#####Run for each cellType###############
+
+###Load data
+EC <- read.csv('Correlation/EC.kendall.correlation.csv', row.names = 1)
+Immune <- read.csv('Correlation/Immune.kendall.correlation.csv', row.names = 1)
+SMC_Pericytes <- read.csv('Correlation/SMC_Pericytes.kendall.correlation.csv', row.names = 1)
+MuSC <- read.csv('Correlation/MuSC.kendall.correlation.csv', row.names = 1)
+FAP <- read.csv('Correlation/FAP.kendall.correlation.csv', row.names = 1)
+EGF <- read.csv('Correlation/EGF.kendall.correlation.csv', row.names = 1)
+Myonuclei <- read.csv('Correlation/Myonuclei.kendall.correlation.csv', row.names = 1)
+MYH7B <- read.csv('Correlation/MYH7B.kendall.correlation.csv', row.names = 1)
+
+###calculate emperical P values for each gene that passes P < 0.05
+sig_gene <- function(df){
+  df <- subset(df, df$P_value < 0.05 )
+  genes <- df$Gene
+  return(genes)
+}
+
+siggene <- sig_gene(Immune)
+normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.Immune.csv", row.names = 1)
+normalized_counts[1:6, 1:6]
+normalized_counts <- normalized_counts[rownames(normalized_counts) %in% siggene, ]
+
+###make sure trait data order matches with counts order
+column_order <- colnames(normalized_counts)
+clinical_data <- clinical_data[column_order,]
+
+
+# Set parameters for permutation
+n_permutations <- 1000  # Number of permutations
+
+# Initialize an empty list to store the permutation results
+permuted_correlations <- matrix(NA, nrow = n_permutations, ncol = nrow(normalized_counts))
+
+# Compute the original correlations, ##this will match the original correlation but has just been re-run on significant genes
+original_correlations <- apply(normalized_counts, 1, function(gene_expr_values) {
+  cor.test(gene_expr_values, clinical_data$RdSS2kgFFMInsulin_Pre, method = 'kendall')$estimate
+})
+
+# Perform the permutation procedure
+for (i in 1:n_permutations) {
+  # Permute the RdSS2kgFFMInsulin_Pre values
+  permuted_labels <- sample(clinical_data$RdSS2kgFFMInsulin_Pre)
+  
+  # Compute the Kendall correlation between the gene expression and permuted labels
+  permuted_correlations[i, ] <- apply(normalized_counts, 1, function(gene_expr_values) {
+    cor.test(gene_expr_values, permuted_labels, method = 'kendall')$estimate
+  })
+}
+
+# Calculate empirical p-values for each gene
+empirical_p_values <- apply(permuted_correlations, 2, function(permuted_corrs, original_corrs) {
+  # Calculate how often the permuted correlations are as extreme as the original correlation
+  mean(abs(permuted_corrs) >= abs(original_corrs))  # Two-tailed test
+}, original_corrs = original_correlations)
+
+# Output the empirical p-values
+empirical_p_values
+max(empirical_p_values)
+min(empirical_p_values)
+
+# Create a data frame to store gene names and their corresponding empirical p-values
+gene_p_values <- data.frame(
+  Gene = rownames(normalized_counts),  # Gene names (assuming genes are the row names of normalized_counts)
+  Empirical_p_value = empirical_p_values
+)
+
+# Output the data frame with gene names and empirical p-values
+head(gene_p_values)  # Print the first few rows
+df2 <- left_join(MYH7B, gene_p_values, by = 'Gene')
+
+write.csv(df2, 'Correlation/Immune.kendall.adjusted.csv')
+
+###########Run for each cell type################
+
+####Load data with empirical values and compare signatures
+EC <- read.csv('Correlation/EC.kendall.adjusted.csv', row.names = 1)
+Immune <- read.csv('Correlation/Immune.kendall.adjusted.csv', row.names = 1)
+SMC_Pericytes <- read.csv('Correlation/SMC_Pericytes.kendall.adjusted.csv', row.names = 1)
+MuSC <- read.csv('Correlation/MuSC.kendall.adjusted.csv', row.names = 1)
+FAP <- read.csv('Correlation/FAP.kendall.adjusted.csv', row.names = 1)
+EGF <- read.csv('Correlation/EGF.kendall.adjusted.csv', row.names = 1)
+CKM <- read.csv('Correlation/CKM.kendall.adjusted.csv', row.names = 1)
+MYH7B <- read.csv('Correlation/MYH7B.kendall.adjusted.csv', row.names = 1)
+
+backgroundEC <- EC$Gene
+backgroundImmune <- Immune$Gene
+backgroundSMC_Pericytes <- SMC_Pericytes$Gene
+backgroundMuSC <- MuSC$Gene
+backgroundFAP <- FAP$Gene
+backgroundEGF <- EGF$Gene
+backgroundCKM <- CKM$Gene
+backgroundMYH7B <- MYH7B$Gene
+
+
+
+pos_cor <- function(df, tau_val){
+  df <- subset(df, df$Empirical_p_value < 0.05 & df$tau > tau_val)
+  df <- df[order(-df$tau),] 
+  return(df)
+}
+
+neg_cor <- function(df, tau_val){
+  df <- subset(df, df$Empirical_p_value < 0.05 & df$tau < tau_val)
+  df <- df[order(df$tau),] 
+  return(df)
+}
+
+ECpos <- pos_cor(EC, 0)
+ECneg <- neg_cor(EC, 0)
+
+SMC_Pericytespos <- pos_cor(SMC_Pericytes, 0)
+SMC_Pericytesneg <- neg_cor(SMC_Pericytes, 0)
+
+Immunepos <- pos_cor(Immune, 0)
+Immuneneg <- neg_cor(Immune, 0)
+
+MuSCpos <- pos_cor(MuSC, 0)
+MuSCneg <- neg_cor(MuSC, 0)
+
+FAPpos <- pos_cor(FAP, 0)
+FAPneg <- neg_cor(FAP, 0)
+
+CKMpos <- pos_cor(CKM, 0)
+CKMneg <- neg_cor(CKM, 0)
+
+MYH7Bpos <- pos_cor(MYH7B, 0)
+MYH7Bneg <- neg_cor(MYH7B, 0)
+
+EGFpos <- pos_cor(EGF, 0)
+EGFneg <- neg_cor(EGF, 0)
+
+##Get list of pos and neg correlated genes for each cell type
+EGFpos_genes <- EGFpos$Gene
+EGFneg_genes <- EGFneg$Gene
+EGF_genes <- c(EGFpos_genes, EGFneg_genes)
+
+CKMpos_genes <- CKMpos$Gene
+CKMneg_genes <- CKMneg$Gene
+CKM_genes <- c(CKMpos_genes, CKMneg_genes)
+
+
+MYH7Bpos_genes <- MYH7Bpos$Gene
+MYH7Bneg_genes <- MYH7Bneg$Gene
+MYH7B_genes <- c(MYH7Bpos_genes, MYH7Bneg_genes)
+
+ECpos_genes <- ECpos$Gene
+ECneg_genes <- ECneg$Gene
+EC_genes <- c(ECpos_genes, ECneg_genes)
+
+FAPpos_genes <- FAPpos$Gene
+FAPneg_genes <- FAPneg$Gene
+FAP_genes <- c(FAPpos_genes, FAPneg_genes)
+
+SMC_Pericytespos_genes <- SMC_Pericytespos$Gene
+SMC_Pericytesneg_genes <- SMC_Pericytesneg$Gene
+SMC_Pericytes_genes <- c(SMC_Pericytespos_genes, SMC_Pericytesneg_genes)
+
+Immunepos_genes <- Immunepos$Gene
+Immuneneg_genes <- Immuneneg$Gene
+Immune_genes <- c(Immunepos_genes, Immuneneg_genes)
+
+MuSCpos_genes <- MuSCpos$Gene
+MuSCneg_genes <- MuSCneg$Gene
+MuSC_genes <- c(MuSCpos_genes, MuSCneg_genes)
+
+
+signatures_up <- list("EGF+ CKM" = EGFpos_genes,
+                        "CKM+ CKM" = CKMpos_genes,
+                        "MYH7B+ CKM" = MYH7Bpos_genes,
+                        "EC" = ECpos_genes,
+                        "FAP" = FAPpos_genes,
+                        "SMC_Pericytes" = SMC_Pericytespos_genes,
+                        "Immune" = Immunepos_genes,
+                        "MuSC" = MuSCpos_genes
+)
+
+
+m <-  make_comb_mat(list_to_matrix(signatures_up))
+str(m)
+t(m)
+
+comb_name(m)
+ComplexHeatmap::UpSet(m)
+
+##620 344
+UpSet(m[comb_size(m) >= 5], comb_col = "#35978F")
+
+
+signatures_down <- list("EGF+ CKM" = EGFneg_genes,
+                        "CKM+ CKM" = CKMneg_genes,
+                        "MYH7B+ CKM" = MYH7Bneg_genes,
+                        "EC" = ECneg_genes,
+                        "FAP" = FAPneg_genes,
+                        "SMC_Pericytes" = SMC_Pericytesneg_genes,
+                        "Immune" = Immuneneg_genes,
+                        "MuSC" = MuSCneg_genes
+)
+
+
+m2 <-  make_comb_mat(list_to_matrix(signatures_down))
+UpSet(m2)
+UpSet(m2[comb_size(m2) >= 5], comb_col = "#BF812D")
+
+
+###run pathway analyses using TMsig 
+##Load GO:BP pathays from MsigDB
+geneSets <- gmtPathways('MsigDB/c5.go.bp.v2024.1.Hs.symbols.gmt')
+length(geneSets) 
+
+
+# Restrict genes sets to background of genes
+##Will need to repeat this for each celltype
+geneSetsFilt <- filterSets(
+  x = geneSets, 
+  background = backgroundEGF,
+  min_size = 10L # min. overlap of each set with background
+)
+
+length(geneSetsFilt) 
+
+# Calculate proportion of overlap with background
+setSizes <- lengths(geneSetsFilt)
+setSizesOld <- lengths(geneSets)[names(geneSetsFilt)]
+overlapProp <- setSizes / setSizesOld
+
+plot(setSizesOld, overlapProp, main = "Set Size vs. Overlap")
+table(overlapProp >= 0.8)
+
+geneSetsFilt <- geneSetsFilt[overlapProp >= 0.8]
+length(geneSetsFilt) 
+
+#Incidence Matrix
+imat <- sparseIncidence(x = geneSetsFilt)
+dim(imat) 
+
+imat[seq_len(8L), seq_len(5L)]
+# Calculate sizes of all pairwise intersections
+tcrossprod(imat)[1:3, 1:3]
+crossprod(imat)[1:3, 1:3]
+
+#Set similarity
+##Jaacard
+jaccard <- similarity(x = geneSetsFilt)
+dim(jaccard)
+class(jaccard)
+
+
+##Cluster similar sets
+# clusterSets with default arguments
+clusterDF <- clusterSets(x = geneSetsFilt, 
+                         type = "jaccard", 
+                         cutoff = 0.85, 
+                         method = "complete",
+                         h = 0.9)
+
+# First 4 clusters with 2 or more sets
+subset(clusterDF, subset = cluster <= 4L)
+
+##In each cluster, a single set can be retained for analysis using a combination of criteria such as set size, 
+#overlap proportion, or length of the description (shorter descriptions tend to be more general terms).
+
+## Use clusterSets output to select sets to retain for analysis
+clusterDF$overlap_prop <- overlapProp[clusterDF$set] # overlap proportion
+clusterDF$n_char <- nchar(clusterDF$set) # length of set description
+
+# Reorder rows so that the first set in each cluster is the one to keep
+o <- with(clusterDF, 
+          order(cluster, set_size, overlap_prop, n_char, set,
+                decreasing = c(FALSE, TRUE, TRUE, FALSE, TRUE),
+                method = "radix"))
+clusterDF <- clusterDF[o, ]
+
+subset(clusterDF, cluster <= 4L) # show first 4 cluste
+
+
+# Sets to keep for analysis
+keepSets <- with(clusterDF, set[!duplicated(cluster)])
+head(keepSets, 4L)
+
+
+# Subset geneSetsFilt to those sets
+geneSetsFilt <- geneSetsFilt[keepSets]
+length(geneSetsFilt) 
+
+M1 <- hypeR(EGFneg_genes, geneSetsFilt, test="hypergeometric", background = backgroundEGF, absolute = FALSE, pval = 0.05)
+hyp_dots(M1 , merge=TRUE, top = 25, pval = 0.05) 
+
+hyp_to_excel(M1, file_path='Correlation/ORA after TMsig/EGF.neg.BP.xlsx')
+
+
+#########run for each cell type and each direction ###########
+
+##load data
+EC_BP_pos <- read_excel('Correlation/ORA after TMsig/EC.pos.BP.xlsx')
+EC_BP_neg <- read_excel('Correlation/ORA after TMsig/EC.neg.BP.xlsx')
+SMC_Pericytes_BP_pos <- read_excel('Correlation/ORA after TMsig/SMC_Pericytes.pos.BP.xlsx')
+SMC_Pericytes_BP_neg <- read_excel('Correlation/ORA after TMsig/SMC_Pericytes.neg.BP.xlsx')
+Immune_BP_pos <- read_excel('Correlation/ORA after TMsig/Immune.pos.BP.xlsx')
+Immune_BP_neg <- read_excel('Correlation/ORA after TMsig/Immune.neg.BP.xlsx')
+MuSC_BP_pos <- read_excel('Correlation/ORA after TMsig/MuSC.pos.BP.xlsx')
+MuSC_BP_neg <- read_excel('Correlation/ORA after TMsig/MuSC.neg.BP.xlsx')
+FAP_BP_pos <- read_excel('Correlation/ORA after TMsig/FAP.pos.BP.xlsx')
+FAP_BP_neg <- read_excel('Correlation/ORA after TMsig/FAP.neg.BP.xlsx')
+EGF_BP_pos <- read_excel('Correlation/ORA after TMsig/EGF.pos.BP.xlsx')
+EGF_BP_neg <- read_excel('Correlation/ORA after TMsig/EGF.neg.BP.xlsx')
+MYH7B_BP_pos <- read_excel('Correlation/ORA after TMsig/MYH7B.pos.BP.xlsx')
+MYH7B_BP_neg <- read_excel('Correlation/ORA after TMsig/MYH7B.neg.BP.xlsx')
+CKM_BP_pos <- read_excel('Correlation/ORA after TMsig/CKM.pos.BP.xlsx')
+CKM_BP_neg <- read_excel('Correlation/ORA after TMsig/CKM.neg.BP.xlsx')
+
+##combine to make one plot
+##make with top3
+get_labels <- function(df){
+  df <- subset(df, df$fdr < 0.4)
+  labels <- df$label[1:3]
+  return(labels)
+}
+
+process_neg <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- df[df$label %in% labels, ]
+  df$log10pvalue <- log10(df$pval)
+  return(df)
+}
+
+process_pos <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- df[df$label %in% labels, ]
+  df$log10pvalue <- -log10(df$pval)
+  return(df)
+}
+
+labels1 <- get_labels(EGF_BP_neg)
+labels2 <- get_labels(EGF_BP_pos)
+labels3 <- get_labels(CKM_BP_pos )
+labels4 <- get_labels(CKM_BP_neg)
+labels5 <- get_labels(MYH7B_BP_pos )
+labels6 <- get_labels(MYH7B_BP_neg)
+labels7 <- get_labels(MuSC_BP_neg)
+labels8 <- get_labels(MuSC_BP_pos)
+labels9 <- get_labels(FAP_BP_neg)
+labels10 <- get_labels(FAP_BP_pos)
+labels11 <- get_labels(SMC_Pericytes_BP_neg)
+labels12 <- get_labels(SMC_Pericytes_BP_pos)
+labels13 <- get_labels(EC_BP_neg)
+labels14 <- get_labels(EC_BP_pos)
+labels15 <- get_labels(Immune_BP_pos)
+labels16 <- get_labels(Immune_BP_neg)
+
+
+
+
+labels <- unique(c(labels1, labels2, labels3, labels4, labels5, labels6, labels7, labels8, labels9,
+                   labels10, labels11, labels12, labels13, labels14, labels15, labels16))
+labels <- labels[!is.na(labels)]
+
+
+EGF_BP_pos <- process_pos(EGF_BP_pos, 'EGF+ CKM', 'pos', labels)
+EGF_BP_neg <- process_neg(EGF_BP_neg, 'EGF+ CKM', 'neg', labels)
+CKM_BP_pos <- process_pos(CKM_BP_pos, 'CKM+ CKM', 'pos', labels)
+CKM_BP_neg <- process_neg(CKM_BP_neg, 'CKM+ CKM', 'neg', labels)
+MYH7B_BP_pos <- process_pos(MYH7B_BP_pos, 'MYH7B+ CKM', 'pos', labels)
+MYH7B_BP_neg <- process_neg(MYH7B_BP_neg, 'MYH7B+ CKM', 'neg', labels)
+MuSC_BP_pos <- process_pos(MuSC_BP_pos, 'MuSC', 'pos', labels)
+MuSC_BP_neg <- process_neg(MuSC_BP_neg, 'MuSC', 'neg', labels)
+FAP_BP_pos <- process_pos(FAP_BP_pos, 'FAP', 'pos', labels)
+FAP_BP_neg <- process_neg(FAP_BP_neg, 'FAP', 'neg', labels)
+SMC_Pericytes_BP_pos <- process_pos(SMC_Pericytes_BP_pos, 'SMC/Pericytes', 'pos', labels)
+SMC_Pericytes_BP_neg <- process_neg(SMC_Pericytes_BP_neg, 'SMC/Pericytes', 'neg', labels)
+EC_BP_pos <- process_pos(EC_BP_pos, 'EC', 'pos', labels)
+EC_BP_neg <- process_neg(EC_BP_neg, 'EC', 'neg', labels)
+Immune_BP_pos <- process_pos(Immune_BP_pos, 'Immune', 'pos', labels)
+Immune_BP_neg <- process_neg(Immune_BP_neg, 'Immune', 'neg', labels)
+
+
+
+##Make value negative if there is a negative correlation
+
+
+mega <- rbind(EC_BP_pos, EC_BP_neg, SMC_Pericytes_BP_neg, SMC_Pericytes_BP_pos, Immune_BP_neg, Immune_BP_pos,  MuSC_BP_neg, MuSC_BP_pos,
+              FAP_BP_neg, FAP_BP_pos, CKM_BP_neg, CKM_BP_pos, MYH7B_BP_neg, MYH7B_BP_pos, EGF_BP_neg, EGF_BP_pos)
+
+
+levels2 <- c('EGF+ CKM', 'MYH7B+ CKM',  'CKM+ CKM', 'MuSC', "FAP", 'SMC/Pericytes', 'EC', 'Immune')
+mega$CellType <- factor(mega$CellType, levels = levels2)
+mega$label <- factor(mega$label, levels = labels)
+
+
+mega$label <- gsub("_", ' ', mega$label)
+mega$label <- tolower(mega$label)
+mega$label <- toTitleCase(mega$label)
+mega$label <- gsub('Gobp', '', mega$label)
+mega$label <- gsub('Rna', 'RNA', mega$label)
+mega$label <- gsub('Er', 'ER', mega$label)
+mega$label <- gsub('Atpase', 'ATPase', mega$label)
+
+labels <- gsub("_", ' ', labels)
+labels <- tolower(labels)
+labels <- toTitleCase(labels)
+labels <- gsub('Gobp', '', labels)
+labels <- gsub('Rna', 'RNA', labels)
+labels <- gsub('Er', 'ER', labels)
+labels <- gsub('Atpase', 'ATPase', labels)
+
+mega$label <- factor(mega$label, levels = labels)
+
+mega <- mega %>%
+  mutate(category = case_when(
+    fdr <= 0.2 ~ "*",
+    fdr >  0.2 ~ ""
+  ))
+
+head(mega)
+mega <- subset(mega, fdr < 0.4)
+
+
+
+
+path_plot2 <- ggplot(data = mega, mapping = aes(x = CellType, y = label, size = overlap)) +
+  geom_point(aes(colour = log10pvalue)) +  # Plot points colored by -log10(pvalue)
+  geom_text(aes(label = category), vjust = 0.75, size = 5, color = "white") +
+  theme_classic() +
+  scale_colour_gradient2(
+    high = "#35978F", low = "#BF812D", mid = 'white', midpoint = 0, name = "signed log10(pvalue)"
+  ) +
+  my_theme +
+  labs(x = '', y = '') 
+
+path_plot2
+
+
+
+ggsave(
+  filename = "Figures/path_plot_Rd.I.top3.pdf",
+  plot = path_plot2,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 20,
+  height = 13,
+  units = c("cm"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+
+##Make one big csv with all neg and pos correlations
+EC <- read.csv('Correlation/EC.kendall.adjusted.csv', row.names = 1)
+Immune <- read.csv('Correlation/Immune.kendall.adjusted.csv', row.names = 1)
+SMC_Pericytes <- read.csv('Correlation/SMC_Pericytes.kendall.adjusted.csv', row.names = 1)
+MuSC <- read.csv('Correlation/MuSC.kendall.adjusted.csv', row.names = 1)
+FAP <- read.csv('Correlation/FAP.kendall.adjusted.csv', row.names = 1)
+EGF <- read.csv('Correlation/EGF.kendall.adjusted.csv', row.names = 1)
+CKM <- read.csv('Correlation/CKM.kendall.adjusted.csv', row.names = 1)
+MYH7B <- read.csv('Correlation/MYH7B.kendall.adjusted.csv', row.names = 1)
+
+
+organize <- function(df, CellType){
+  df <- subset(df, df$Empirical_p_value < 0.05)
+  df <- df %>% dplyr::select(1:2)
+  colnames(df)[2] <- paste0(colnames(df), CellType)[2]
+  df <- df[order(-df$tau),] 
+  return(df)
+}
+
+
+EC <- organize(EC, 'EC')
+Immune <- organize(Immune, 'Immune')
+SMC_Pericytes <- organize(SMC_Pericytes, 'SMC_Pericytes')
+FAP <- organize(FAP, 'FAP')
+MuSC <- organize(MuSC, 'MuSC')
+EGF <- organize(EGF, 'EGF')
+CKM <- organize(CKM, 'CKM')
+MYH7B <- organize(MYH7B, 'MYH7B')
+
+genes1 <- unique(unlist(signatures_up) %>% as.vector())
+genes2 <- unique(unlist(signatures_down) %>% as.vector())
+Gene <- unique(c(genes1, genes2))
+df <- as.data.frame(Gene)
+head(df)
+
+mega <- left_join(df, EC, by = 'Gene')
+mega <- left_join(mega, Immune, by = 'Gene')
+mega <- left_join(mega, SMC_Pericytes, by = 'Gene')
+mega <- left_join(mega, FAP, by = 'Gene')
+mega <- left_join(mega, MuSC, by = 'Gene')
+mega <- left_join(mega, EGF, by = 'Gene')
+mega <- left_join(mega, CKM, by = 'Gene')
+mega <- left_join(mega, MYH7B, by = 'Gene')
+
+mega <- mega %>% remove_rownames %>% column_to_rownames(var="Gene")
+mega_cleaned <- mega[rowSums(is.na(mega)) < ncol(mega), ]
+
+head(mega_cleaned)
+dim(mega_cleaned)
+
+write.csv(mega_cleaned, file('Correlation/kendall.correlation.csv'))
+
+
+##plot of individual genes with Rd/I
+normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.EGF.csv", row.names = 1)
+
+df <- as.data.frame(t(normalized_counts))
+df$Sample <- rownames(df)
+clinical_data
+mega <- left_join(df, clinical_data, by = 'Sample')
+ggplot(mega, aes(x=SLC39A14, y=RdSS2kgFFMInsulin_Pre)) + geom_point() + geom_smooth(method=lm) + stat_cor(method = 'kendall')
+
+
+
+P1 <- ggplot(mega, aes(x = SLC39A14, y = RdSS2kgFFMInsulin_Pre)) +
+  geom_point(aes(colour = Group2)) +  # Color only points by Group
+  geom_smooth(method = lm, color = "black") +  # One regression line for all points
+  stat_cor(method = "kendall", color = "black") +  # One correlation for all points
+  scale_colour_manual(values = c("CON" = "#00AFBB", "T2D" = "#F4a582")) + 
+  my_theme + labs(x = 'SLC39A14 pseudobulk expression', y = 'Rd/I [(mg/kgFFM/min)]/Insulin', title = 'EGF+ Myonculei', colour = 'Group')
+
+
