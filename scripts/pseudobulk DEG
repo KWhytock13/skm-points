@@ -26,6 +26,8 @@ library(ggpubr)
 library(readxl)
 library(tools)
 
+###Pseudbulk DEG initially performed without covariates. Normalized counts data were then used for subsequent analyses e.g. kendall correlation. 
+
 
 setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data")
 
