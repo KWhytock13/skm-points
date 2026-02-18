@@ -1,0 +1,597 @@
+###Points pseudobulk analysis
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix.utils)
+library(edgeR)
+library(dplyr)
+library(magrittr)
+library(Matrix)
+library(purrr)
+library(reshape2)
+library(S4Vectors)
+library(tibble)
+library(SingleCellExperiment)
+library(pheatmap)
+library(apeglm)
+library(png)
+library(DESeq2)
+library(RColorBrewer)
+library(TMSig)
+library(fgsea)
+library(data.table)
+library(plotrix)
+library(hypeR)
+library(ComplexHeatmap)
+library(UpSetR)
+library(ggpubr)
+library(readxl)
+library(tools)
+
+
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data")
+
+
+my_theme <- theme_classic() + theme(text = element_text(size=12, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 12, angle =45, hjust = 1),
+                                    axis.text.y = element_text(colour = "black", size = 12),
+                                    axis.title.x = element_text(colour = "black", size = 12),
+                                    axis.title.y = element_text(colour = "black", size = 12),
+)
+
+
+seurat <- readRDS('Integration/Points.harmony.sct.RDS')
+
+Idents(seurat) = seurat$cluster_id
+
+levels <- c('EGF+ Myonuclei', 'CKM+ Myonuclei',  'MYH7B+ Myonuclei', 'MuSC', 'FAP', 'SMC.Pericytes', 'EC', 'Immune')
+levels(seurat) <- levels
+
+DefaultAssay(object = seurat) <- "filtered"
+seurat <- NormalizeData(seurat)
+all.genes <- rownames(seurat)
+seurat <- ScaleData(seurat, features = all.genes)
+
+
+###Edit metadata col names so it matches what is used in tutorial
+names(seurat@meta.data)[names(seurat@meta.data) == "orig.ident"] <- "sample_id"
+names(seurat@meta.data)[names(seurat@meta.data) == "Group"] <- "group_id"
+
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- seurat@assays$filtered@counts 
+
+metadata <- seurat@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+
+metadata$cluster_id <- factor(seurat@active.ident)
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts), 
+                            colData = metadata)
+
+# Identify groups for aggregation of counts
+groups <- colData(sce)[, c("cluster_id", "sample_id")]
+
+# Explore the raw counts for the dataset
+
+## Check the assays present
+assays(sce)
+
+## Explore the raw counts for the dataset
+dim(counts(sce))
+counts(sce)[1:6, 1:6]
+
+#Named vector of cluster names
+kids <- purrr::set_names(levels(sce$cluster_id))
+#kids <- purrr::set_names(unique(sce$CellType2))
+kids
+
+# Total number of clusters
+nk <- length(kids)
+nk
+
+# Named vector of sample names
+#sids <- purrr::set_names(levels(sce$orig.ident))
+sids <- purrr::set_names(unique(sce$sample_id))
+
+# Total number of samples 
+ns <- length(sids)
+ns
+
+# Generate sample level metadata
+
+## Determine the number of cells per sample
+table(sce$sample_id)
+
+## Turn named vector into a numeric vector of number of cells per sample
+n_cells <- as.numeric(table(sce$sample_id))
+
+## Determine how to reoder the samples (rows) of the metadata to match the order of sample names in sids vector
+m <- match(sids, sce$sample_id)
+
+## Create the sample level metadata by combining the reordered metadata with the number of cells corresponding to each sample.
+ei <- data.frame(colData(sce)[m, ], 
+                 n_cells, row.names = NULL) %>% 
+  dplyr::select(-"cluster_id")
+ei
+
+ei <- ei[, colnames(ei) %in% c('sample_id', 'group_id')]
+
+##load covariates
+covariates <- read.csv('clinical/points.covariates.csv')
+ei <- left_join(ei, covariates, by = "sample_id")
+head(ei)
+
+## Keep only needed columns
+ei <- ei[, c("sample_id", "group_id", "FFM")]
+
+## Remove missing FFM samples
+ei <- ei %>% filter(!is.na(FFM))
+
+## Set correct types
+ei$group_id <- factor(ei$group_id)
+ei$FFM <- as.numeric(ei$FFM)
+
+
+# Subset metadata to only include the cluster and sample IDs to aggregate across
+groups <- colData(sce)[, c("cluster_id", "sample_id")]
+
+# Aggregate across cluster-sample groups
+pb <- aggregate.Matrix(t(counts(sce)), 
+                       groupings = groups, fun = "sum") 
+
+class(pb)
+
+dim(pb)
+
+pb[1:6, 1:6]
+
+#Not every cluster is present in all samples; create a vector that represents how to split samples
+splitf <- sapply(stringr::str_split(rownames(pb), 
+                                    pattern = "_",  
+                                    n = 2), 
+                 `[`, 1)
+
+# Turn into a list and split the list into components for each cluster and transform, so rows are genes and columns are samples and make rownames as the sample IDs
+pb <- split.data.frame(pb, 
+                       factor(splitf)) %>%
+  lapply(function(u) 
+    set_colnames(t(u), 
+                 stringr::str_extract(rownames(u), "(?<=_)[:alnum:]+")))
+
+class(pb)
+
+# Explore the different components of list
+str(pb)
+
+
+# Ensure your metadata is ready
+metadata <- ei  # using your cleaned ei
+
+dds_list <- list()  # to store DESeqDataSet objects per cluster
+
+for (cluster_name in names(pb)) {
+  
+  # Get counts for cluster
+  cluster_counts <- pb[[cluster_name]]
+  
+  # Subset metadata to samples present in this cluster
+  cluster_metadata <- metadata %>%
+    filter(sample_id %in% colnames(cluster_counts)) %>%
+    filter(!is.na(FFM))
+  
+  # Skip cluster if no samples left after filtering
+  if (nrow(cluster_metadata) == 0) {
+    warning(paste0("No samples left for cluster: ", cluster_name, " after filtering"))
+    next
+  }
+  
+  # Reorder counts columns to match metadata rows
+  cluster_counts <- cluster_counts[, cluster_metadata$sample_id]
+  
+ 
+  #  Round counts to whole numbers for DESeq2 (keep numeric type)
+  cluster_counts@x <- round(cluster_counts@x)
+  
+  # Set rownames of metadata for DESeq2
+  rownames(cluster_metadata) <- cluster_metadata$sample_id
+  
+  # Ensure covariates have correct type and group is factor
+  cluster_metadata$FFM <- as.numeric(cluster_metadata$FFM)
+  cluster_metadata$group_id <- factor(cluster_metadata$group_id)
+  
+  # Create DESeqDataSet object with design matrix
+  dds <- DESeqDataSetFromMatrix(
+    countData = cluster_counts,
+    colData = cluster_metadata,
+    design = ~ FFM + group_id
+  )
+  
+  #  Store in list
+  dds_list[[cluster_name]] <- dds
+}
+
+# Check how many DESeqDataSets were created
+length(dds_list)
+names(dds_list)
+
+outdir <- "GroupDegs/Pseudobulk DEG w covariates"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+smallestGroupSize <- 9  
+
+for (cluster_name in names(dds_list)) {
+  
+  message("Running DESeq for: ", cluster_name)
+  
+  dds <- dds_list[[cluster_name]]
+  
+  # Remove zero genes 
+  dds <- dds[rowSums(counts(dds)) > 0, ]
+  
+  # Filter low expressed genes
+  keep <- rowSums(counts(dds) >= 1) >= smallestGroupSize
+  dds <- dds[keep, ]
+  
+  if (nrow(dds) == 0) {
+    warning("No genes left after filtering for cluster: ", cluster_name)
+    next
+  }
+  
+  # rlog transformation
+
+  rld <- rlog(dds, blind = TRUE)
+  rld_mat <- assay(rld)
+  
+  write.csv(
+    rld_mat,
+    file.path(outdir, paste0("normalized_", cluster_name, ".csv"))
+  )
+  
+  # ---------------------------
+  # Run DESeq
+  # ---------------------------
+  dds <- DESeq(dds)
+  
+  # Check group levels
+  group_levels <- levels(colData(dds)$group_id)
+  
+  if (length(group_levels) < 2) {
+    warning("Only one group present in cluster: ", cluster_name)
+    next
+  }
+  
+  contrast <- c("group_id",
+                group_levels[2],
+                group_levels[1])
+  
+  res <- results(dds, contrast = contrast, alpha = 0.05)
+  
+  # Safer lfcShrink (recommended method)
+  coef_name <- resultsNames(dds)[grep("group_id", resultsNames(dds))]
+  
+  res2 <- lfcShrink(dds,
+                    coef = coef_name[1],
+                    type = "apeglm")
+  
+  # Order results
+  res <- res[order(res$pvalue), ]
+  res2 <- res2[order(res2$pvalue), ]
+  
+  # Convert to tables
+  res_tbl <- as.data.frame(res) %>%
+    rownames_to_column("gene")
+  
+  res_tbl2 <- as.data.frame(res2) %>%
+    rownames_to_column("gene")
+  
+  # ---------------------------
+  # Save results
+  # ---------------------------
+  write.csv(res_tbl,
+            file.path(outdir, paste0(cluster_name, "_bulk_group.csv")),
+            row.names = FALSE)
+  
+  write.csv(res_tbl2,
+            file.path(outdir, paste0(cluster_name, "_bulk_lfc_shrink_group.csv")),
+            row.names = FALSE)
+  
+}
+
+
+
+
+
+###Load DEG lists
+EGF <- read.csv("GroupDegs/Pseudobulk DEG w covariates/EGF+ Myonuclei_bulk_group.csv", row.names = 1)
+CKM <- read.csv("GroupDegs/Pseudobulk DEG w covariates/CKM+ Myonuclei_bulk_group.csv", row.names = 1)
+MYH7B <- read.csv("GroupDegs/Pseudobulk DEG w covariates/MYH7B+ Myonuclei_bulk_group.csv", row.names = 1)
+EC <- read.csv("GroupDegs/Pseudobulk DEG w covariates/EC_bulk_group.csv", row.names = 1)
+SMC_Pericytes <- read.csv("GroupDegs/Pseudobulk DEG w covariates/SMC.Pericytes_bulk_group.csv", row.names = 1)
+FAP <- read.csv("GroupDegs/Pseudobulk DEG w covariates/FAP_bulk_group.csv", row.names = 1)
+Immune <- read.csv("GroupDegs/Pseudobulk DEG w covariates/Immune_bulk_group.csv", row.names = 1)
+MuSC <- read.csv("GroupDegs/Pseudobulk DEG w covariates/MuSC_bulk_group.csv", row.names = 1)
+
+upregulated <- function(df, value){
+  df <- subset(df, df$padj < 0.05 & df$log2FoldChange > value )
+  return(df)
+}
+
+downregulated <- function(df, value){
+  df <- subset(df, df$padj < 0.05 & df$log2FoldChange < value )
+  return(df)
+}
+
+###separate lists of upregulated and downregulated genes for each cluster to 
+#represent what is up and downregulated in each group for that cluster
+EGF_Up <- upregulated(df = EGF,0)
+EGF_Down <- downregulated(df = EGF, 0)
+
+CKM_Up <- upregulated(df = CKM,0)
+CKM_Down <- downregulated(df = CKM, 0)
+
+MYH7B_Up <- upregulated(df = MYH7B,0)
+MYH7B_Down <- downregulated(df = MYH7B, 0)
+
+EC_Up <- upregulated(df = EC,0)
+EC_Down <- downregulated(df = EC, 0)
+
+FAP_Up <- upregulated(df = FAP,0)
+FAP_Down <- downregulated(df = FAP, 0)
+
+SMC_Pericytes_Up <- upregulated(df = SMC_Pericytes,0)
+SMC_Pericytes_Down <- downregulated(df = SMC_Pericytes, 0)
+
+Immune_Up <- upregulated(df = Immune,0)
+Immune_Down <- downregulated(df = Immune, 0)
+
+MuSC_Up <- upregulated(df = MuSC,0)
+MuSC_Down <- downregulated(df = MuSC, 0)
+
+##Add cell name, merge and make one big DF
+EGF_Up$CellType <- 'EGF+ Myonuclei'
+EGF_Down$CellType <- 'EGF+ Myonuclei'
+
+CKM_Up$CellType <- 'CKM+ Myonuclei'
+CKM_Down$CellType <- 'CKM+ Myonuclei'
+
+MYH7B_Up$CellType <- 'MYH7B+ Myonuclei'
+MYH7B_Down$CellType <- 'MYH7B+ Myonuclei'
+
+SMC_Pericytes_Up$CellType <- 'SMC_Pericytes'
+SMC_Pericytes_Down$CellType <- 'SMC_Pericytes'
+
+FAP_Up$CellType <- 'FAP'
+FAP_Down$CellType <- 'FAP'
+
+MuSC_Up$CellType <- 'MuSC'
+MuSC_Down$CellType <- 'MuSC'
+
+Immune_Up$CellType <- 'Immune'
+Immune_Down$CellType <- 'Immune'
+
+EC_Up$CellType <- 'EC'
+EC_Down$CellType <- 'EC'
+
+mega <- rbind(EGF_Up, EGF_Down, CKM_Up, CKM_Down, MYH7B_Up, MYH7B_Down, SMC_Pericytes_Up, SMC_Pericytes_Down, FAP_Up, 
+              FAP_Down, MuSC_Up, MuSC_Down, Immune_Up, Immune_Down, EC_Up, EC_Down)
+
+write.csv(mega, 'GroupDegs/Pseudobulk DEG w covariates/Group Deg w convariates.csv')
+
+
+##Get list of upregulated genes for each cluster 
+EGF_Up_genes <- rownames(EGF_Up)
+EGF_Down_genes <- rownames(EGF_Down)
+
+CKM_Up_genes <- rownames(CKM_Up)
+CKM_Down_genes <- rownames(CKM_Down)
+
+MYH7B_Up_genes <- rownames(MYH7B_Up)
+MYH7B_Down_genes <- rownames(MYH7B_Down)
+
+EC_Up_genes <- rownames(EC_Up)
+EC_Down_genes <- rownames(EC_Down)
+
+FAP_Up_genes <- rownames(FAP_Up)
+FAP_Down_genes <- rownames(FAP_Down)
+
+SMC_Pericytes_Up_genes <- rownames(SMC_Pericytes_Up)
+SMC_Pericytes_Down_genes <- rownames(SMC_Pericytes_Down)
+
+Immune_Up_genes <- rownames(Immune_Up)
+Immune_Down_genes <- rownames(Immune_Down)
+
+MuSC_Up_genes <- rownames(MuSC_Up)
+MuSC_Down_genes <- rownames(MuSC_Down)
+
+###Make a stacked barplot of number of DEGs for each group
+Value <- c(
+  (length(EGF_Up_genes)), (length(EGF_Down_genes)), (length(CKM_Up_genes)), (length(CKM_Down_genes)), 
+  (length(MYH7B_Up_genes)), (length(MYH7B_Down_genes)), (length(MuSC_Up_genes)), (length(MuSC_Down_genes)),
+  (length(FAP_Up_genes)), (length(FAP_Down_genes)), (length(SMC_Pericytes_Up_genes)), (length(SMC_Pericytes_Down_genes)),
+  (length(EC_Up_genes)), (length(EC_Down_genes)), (length(Immune_Up_genes)), (length(Immune_Down_genes)))
+
+levels <- c('EGF+ Myonuclei', 'CKM+ Myonuclei',  'MYH7B+ Myonuclei', 'MuSC', 'FAP', 'SMC/Pericytes', 'EC', 'Immune')
+CellType <- rep(levels, each = 2)
+Direction <- rep(c('Up', 'Down'), times = 8)
+
+data <- data.frame(Direction, CellType, Value)
+
+
+signatures_up <- list("EGF+ Myonculei" = EGF_Up_genes,
+                      "CKM+ Myonuclei" = CKM_Up_genes,
+                      "MYH7B+ Myonuclei" = MYH7B_Up_genes,
+                      "EC" = EC_Up_genes,
+                      "FAP" = FAP_Up_genes,
+                      "SMC/Pericytes" = SMC_Pericytes_Up_genes,
+                      "Immune" = Immune_Up_genes,
+                      "MuSC" = MuSC_Up_genes
+)
+
+m <-  make_comb_mat(list_to_matrix(signatures_up))
+UpSet(m)
+
+
+plot1 <- UpSet(m[comb_size(m) >= 1], comb_col = "#F4a582")
+plot1
+
+#pdf(file = "Figures/Upsetplot.Up.pdf", width = 8, height = 6)
+UpSet(m[comb_size(m) >= 1], comb_col = "#F4a582")
+
+
+signatures_down <- list("EGF+ Myonculei" = EGF_Down_genes,
+                        "CKM+ Myonuclei" = CKM_Down_genes,
+                        "MYH7B+ Myonuclei " = MYH7B_Down_genes,
+                        "EC" = EC_Down_genes,
+                        "FAP" = FAP_Down_genes,
+                        "SMC/Pericytes" = SMC_Pericytes_Down_genes,
+                        "Immune" = Immune_Down_genes,
+                        "MuSC" = MuSC_Down_genes
+)
+
+
+m2 <-  make_comb_mat(list_to_matrix(signatures_down))
+UpSet(m2)
+UpSet(m2[comb_size(m) >= 1], comb_col = "#00AFBB")
+
+
+
+###Run ORA TMsig, ##repeat for each cellType using GO:GP
+geneSets <- gmtPathways('MsigDB/c5.go.bp.v2024.1.Hs.symbols.gmt')
+
+
+outdir <- "GroupDegs/Pseudobulk DEG w covariates/ORA"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+run_tmSig_ORA <- function(cluster_name, deg_dir){
+  
+  message("Running ORA for: ", cluster_name)
+  
+  # ---------------------------
+  # Load DEG results
+  # ---------------------------
+  
+  file_path <- file.path(deg_dir,
+                         paste0(cluster_name, "_bulk_group.csv"))
+  
+  if(!file.exists(file_path)){
+    message("Skipping ", cluster_name, " — DEG file not found.")
+    return(NULL)
+  }
+  
+  deg <- read.csv(file_path, row.names = 1)
+  
+  # Background genes
+  background_genes <- rownames(deg)
+  
+  # ---------------------------
+  # Define significant gene lists
+  # ---------------------------
+  
+  deg$gene <- rownames(deg)
+  
+  up_genes <- deg %>%
+    filter(padj < 0.05 & log2FoldChange > 0) %>%
+    pull(gene)
+  
+  down_genes <- deg %>%
+    filter(padj < 0.05 & log2FoldChange < 0) %>%
+    pull(gene)
+  
+  if(length(up_genes) < 10 & length(down_genes) < 10){
+    message("Skipping ", cluster_name, " — not enough significant genes.")
+    return(NULL)
+  }
+  
+  # ---------------------------
+  # Filter Gene Sets by Background
+  # ---------------------------
+  
+  geneSetsFilt <- filterSets(
+    x = geneSets,
+    background = background_genes,
+    min_size = 10L
+  )
+  
+  # Keep sets with ≥80% overlap
+  setSizes <- lengths(geneSetsFilt)
+  setSizesOld <- lengths(geneSets)[names(geneSetsFilt)]
+  overlapProp <- setSizes / setSizesOld
+  
+  geneSetsFilt <- geneSetsFilt[overlapProp >= 0.8]
+  
+  if(length(geneSetsFilt) == 0){
+    message("Skipping ", cluster_name, " — no gene sets passed filtering.")
+    return(NULL)
+  }
+  
+  # ---------------------------
+  # Cluster Similar Sets
+  # ---------------------------
+  
+  clusterDF <- clusterSets(
+    x = geneSetsFilt,
+    type = "jaccard",
+    cutoff = 0.85,
+    method = "complete",
+    h = 0.9
+  )
+  
+  clusterDF$overlap_prop <- overlapProp[clusterDF$set]
+  clusterDF$n_char <- nchar(clusterDF$set)
+  
+  o <- with(clusterDF,
+            order(cluster, set_size, overlap_prop, n_char, set,
+                  decreasing = c(FALSE, TRUE, TRUE, FALSE, TRUE),
+                  method = "radix"))
+  
+  clusterDF <- clusterDF[o, ]
+  
+  keepSets <- with(clusterDF, set[!duplicated(cluster)])
+  
+  geneSetsFilt <- geneSetsFilt[keepSets]
+  
+  # ---------------------------
+  # Run ORA
+  # ---------------------------
+  
+  if(length(up_genes) >= 10){
+    M_up <- hypeR(
+      up_genes,
+      geneSetsFilt,
+      test = "hypergeometric",
+      background = background_genes,
+      absolute = FALSE,
+      pval = 0.05
+    )
+    
+    hyp_to_excel(
+      M_up,
+      file_path = file.path(outdir,
+                            paste0(cluster_name, ".Up.GO_BP.xlsx"))
+    )
+  }
+  
+  if(length(down_genes) >= 10){
+    M_down <- hypeR(
+      down_genes,
+      geneSetsFilt,
+      test = "hypergeometric",
+      background = background_genes,
+      absolute = FALSE,
+      pval = 0.05
+    )
+    
+    hyp_to_excel(
+      M_down,
+      file_path = file.path(outdir,
+                            paste0(cluster_name, ".Down.GO_BP.xlsx"))
+    )
+  }
+}
+
+names(pb)
+
+lapply(names(pb), run_tmSig_ORA,
+       deg_dir = "GroupDegs/Pseudobulk DEG w covariates")
