@@ -1,0 +1,361 @@
+####run cell chat to explore EGF and EGFR receptor ligand interactions
+
+library(CellChat)
+library(Seurat)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(reshape2)
+library(tidyr)
+library(purrr)
+library(ggpubr)
+
+future::plan("multisession", workers = 4) # do parallel
+options(future.globals.maxSize = 4 * 1024^3)  # Set limit to 4 GiB
+
+
+my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 10),
+                                    axis.text.y = element_text(colour = "black", size = 10),
+                                    axis.title.x = element_text(colour = "black", size = 10),
+                                    axis.title.y = element_text(colour = "black", size = 10),
+)
+
+
+my_theme2 <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 10, angle =45, hjust = 1),
+                                    axis.text.y = element_text(colour = "black", size = 10),
+                                    axis.title.x = element_text(colour = "black", size = 10),
+                                    axis.title.y = element_text(colour = "black", size = 10),
+)
+
+setwd("~/OneDrive - AdventHealth/Clinical Studies Projects/Points/Data")
+seurat <- readRDS('Integration/Points.harmony.sct.RDS')
+
+Idents(seurat) = seurat$CellType2
+
+##create cell chat
+cellchat <- createCellChat(object = seurat, group.by = "ident", assay = "RNA")
+
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+# use all CellChatDB for cell-cell communication analysis
+ CellChatDB.use <- CellChatDB
+
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+
+##preprocessing
+cellchat <- subsetData(cellchat)
+
+##run each sample individually
+seurat.list <- SplitObject(seurat, split.by = "samples")
+
+
+cellchat.list <- lapply(names(seurat.list), function(s) {
+  seu <- seurat.list[[s]]
+  Idents(seu) <- seu$CellType2
+  chat <- createCellChat(object = seu, group.by = "ident", assay = "RNA")
+  chat@DB <- CellChatDB.human
+  chat <- subsetData(chat)
+  chat <- identifyOverExpressedGenes(chat)
+  chat <- identifyOverExpressedInteractions(chat)
+  chat <- computeCommunProb(chat)
+  chat <- filterCommunication(chat, min.cells = 10)
+  chat <- computeCommunProbPathway(chat)
+  chat <- aggregateNet(chat)
+  return(chat)
+})
+names(cellchat.list) <- names(seurat.list)
+saveRDS(cellchat.list, 'cellchat.list.RDS')
+
+##this function will calculate non-significant interactions and access pval, 
+##you need to add bootstrapping via computeCommunProb by setting the raw.use = TRUE 
+#and including the number of bootstraps with nboot.
+cellchat.list <- lapply(names(seurat.list), function(s) {
+  seu <- seurat.list[[s]]
+  Idents(seu) <- seu$CellType2
+  chat <- createCellChat(object = seu, group.by = "ident", assay = "RNA")
+  chat@DB <- CellChatDB.human
+  chat <- subsetData(chat)
+  chat <- identifyOverExpressedGenes(chat)
+  chat <- identifyOverExpressedInteractions(chat)
+  chat <- computeCommunProb(chat, raw.use = TRUE, nboot = 100)  # includes p-values
+  chat <- filterCommunication(chat, min.cells = 10)
+  chat <- computeCommunProbPathway(chat)
+  chat <- aggregateNet(chat)
+  return(chat)
+})
+
+names(cellchat.list) <- names(seurat.list)
+saveRDS(cellchat.list, 'cellchat.list.V2.RDS')
+cellchat.list <- readRDS('cellchat.list.V2.RDS')
+
+
+
+comm_list <- lapply(names(cellchat.list), function(samp) {
+  mat <- cellchat.list[[samp]]@net$prob
+  pval_mat <- cellchat.list[[samp]]@net$pval
+  
+  df <- melt(mat, varnames = c("source", "target", "interaction_name"), value.name = "prob")
+  df_pval <- melt(pval_mat, varnames = c("source", "target", "interaction_name"), value.name = "pval")
+  
+  df <- left_join(df, df_pval, by = c("source", "target", "interaction_name"))
+  
+  # Add sample column
+  df$sample <- samp
+  
+  # Add pathway name and split LR
+  df <- df %>%
+    mutate(
+      ligand = gsub("_.*", "", interaction_name),
+      receptor = gsub(".*?_", "", interaction_name),  # everything after first "_"
+      pathway_name = cellchat.list[[samp]]@LR$pathway_name[match(interaction_name, cellchat.list[[samp]]@LR$interaction_name)]
+    )
+  
+  return(df)
+})
+
+comm_all <- do.call(rbind, comm_list)
+
+head(comm_all)
+
+subset(comm_all, pval > 0.05)
+
+table(comm_all$pval <= 0.05)
+
+##Add insulin resistance data
+
+head(seurat@meta.data)
+cols <- c('orig.ident', "RdSS2kgFFMInsulin_Pre")
+df <-  unique(seurat@meta.data[,  colnames(seurat@meta.data) %in% cols]  %>% remove_rownames)
+
+comm_all <- left_join(comm_all, df, by = 'orig.ident')
+head(comm_all)
+
+
+
+EGF <- subset(comm_all, ligand == 'EGF')
+str(EGF)
+
+EGF2 <- subset(EGF, source == 'EGF+ Myonuclei')
+
+# 1. Subset just the rows of interest (optional, or skip if you want all)
+# For example: only receptor == "EGFR"
+subset_df <- EGF2 %>%
+  filter(receptor == "EGFR") # add more filters as needed (e.g. ligand == "EGF")
+
+
+
+# 2. Nest by receptor and target
+nested_df <- subset_df %>%
+  group_by(receptor, target) %>%
+  nest()
+
+# 3. Run correlation on each subgroup
+results <- nested_df %>%
+  mutate(cor_test = map(data, ~ cor.test(.x$prob, .x$RdSS2kgFFMInsulin_Pre, method = "pearson"))) %>%
+  mutate(
+    estimate = map_dbl(cor_test, ~ .x$estimate),
+    p.value  = map_dbl(cor_test, ~ .x$p.value)
+  ) %>%
+  dplyr::select(receptor, target, estimate, p.value)
+
+# View results
+print(results)
+
+plot_df <- EGF2 %>%
+  filter(target == "Immune", receptor == "EGFR", ligand == "EGF")
+
+# Create the scatter plot
+ggplot(plot_df, aes(x = RdSS2kgFFMInsulin_Pre, y = prob)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linetype = "dashed") +
+  labs(
+    title = "EGF–EGFR Signaling to Immune Cells",
+    x = "Insulin-Stimulated Glucose Disposal (RdSS2kgFFMInsulin_Pre)",
+    y = "Interaction Probability (prob)"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+
+VlnPlot(seurat, features = 'EGFR', split.by = 'Group', pt.size = 0) 
+VlnPlot(seurat, features = 'EGF', split.by = 'Group', pt.size = 0) 
+
+
+##run correlations for all different interactions
+#run cor.test() only if enough finite, non-NA values exist (e.g., at least 3 paired observations):
+# Group by source, target, ligand, and receptor
+
+
+nested_corr <- comm_all %>%
+  group_by(source, target, ligand, receptor) %>%
+  nest() %>%
+  mutate(
+    n = map_int(data, ~ sum(is.finite(.x$prob) & is.finite(.x$RdSS2kgFFMInsulin_Pre))),
+    cor_test = map2(data, n, ~ if (.y >= 3) cor.test(.x$prob, .x$RdSS2kgFFMInsulin_Pre, method = "kendall") else NA),
+    estimate = map_dbl(cor_test, ~ if (is.list(.x)) .x$estimate else NA_real_),
+    p.value  = map_dbl(cor_test, ~ if (is.list(.x)) .x$p.value  else NA_real_)
+  ) %>%
+  dplyr::select(source, target, ligand, receptor, n, estimate, p.value) %>%
+  arrange(p.value)
+head(nested_corr)
+
+# Step 1: Average or collapse per interaction per sample
+collapsed_df <- comm_all %>%
+  group_by(source, target, ligand, receptor, sample) %>%
+  dplyr::summarise(
+    prob = mean(prob, na.rm = TRUE),
+    RdSS2kgFFMInsulin_Pre = mean(RdSS2kgFFMInsulin_Pre, na.rm = TRUE),
+    .groups = "drop"
+  )
+head(collapsed_df)
+
+head(comm_all)
+collapsed_df <- comm_all %>%
+  group_by(source, target, ligand, receptor, sample) %>%
+  summarise(
+    prob = mean(prob, na.rm = TRUE),
+    RdSS2kgFFMInsulin_Pre = mean(RdSS2kgFFMInsulin_Pre, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+head(collapsed_df)
+
+
+# Filter interactions with mostly zero values
+filtered <- collapsed_df %>%
+  group_by(source, target, ligand, receptor) %>%
+  filter(sum(prob > 0, na.rm = TRUE) >= 3)  # Keep only if ≥ 3 non-zero prob values
+dim(filtered)
+# Step 2: Correlation test per interaction (across samples)
+nested_corr <- filtered  %>%
+  group_by(source, target, ligand, receptor) %>%
+  nest() %>%
+  mutate(
+    n = map_int(data, ~ sum(is.finite(.x$prob) & is.finite(.x$RdSS2kgFFMInsulin_Pre))),
+    cor_test = map2(data, n, ~ if (.y >= 3) cor.test(.x$prob, .x$RdSS2kgFFMInsulin_Pre, method = "pearson") else NA),
+    estimate = map_dbl(cor_test, ~ if (is.list(.x)) .x$estimate else NA_real_),
+    p.value  = map_dbl(cor_test, ~ if (is.list(.x)) .x$p.value  else NA_real_)
+  ) %>%
+  dplyr::select(source, target, ligand, receptor, n, estimate, p.value)
+
+
+# View top significant correlations
+head(nested_corr)
+
+# View valid results
+nested_corr <- nested_corr %>% filter(!is.na(p.value)) 
+sig_corr <- subset(nested_corr, p.value < 0.05)
+dim(sig_corr)
+
+sig_corr <- sig_corr[order(-sig_corr$estimate),] 
+view(sig_corr)
+tail(sig_corr)
+
+write.csv(sig_corr, 'cellChat/interaction_probability_Rd.I.correlation.csv')
+sig_corr <- read.csv('cellChat/interaction_probability_Rd.I.correlation.csv')
+
+
+plyr::count(sig_corr$source)
+plyr::count(sig_corr$target)
+
+sig_corr$log10pvalue <- -log10(sig_corr$p.value)
+
+##extract EGF and make heatmap for that and then put the rest of the interaction in supplmental
+head(sig_corr)
+EGF <- subset(sig_corr, source == 'EGF+ Myonuclei')
+plot1 <- EGF %>% mutate(lr_pair = paste(ligand, receptor, sep = "_")) %>%
+  ggplot(aes(x = target, y = lr_pair, size = log10pvalue, color = estimate)) +
+  geom_point() +
+  scale_color_gradient2(low = "#BF812D", mid = "white", high = "#35978F", midpoint = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + my_theme +  
+  labs(x = 'Cell Target', y = 'LR-Pair', legend = '-log10(pvalue)') 
+plot1
+
+ggsave(
+  filename = "Figures/EGF_Cellchat.pdf",
+  plot = plot1,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 12,
+  height = 10,
+  units = c("cm"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+others <- subset(sig_corr, ! source == 'EGF+ Myonuclei')
+plot2 <- others %>% mutate(lr_pair = paste(ligand, receptor, sep = "_")) %>%
+  ggplot(aes(x = target, y = lr_pair, size = log10pvalue, color = estimate)) +
+  geom_point() +
+  facet_wrap(~ source, scales = "free_y", nrow = 2) +
+  scale_color_gradient2(low = "#BF812D", mid = "white", high = "#35978F", midpoint = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + my_theme2 +  
+  labs(x = 'Cell Target', y = 'LR-Pair', legend = '-log10(pvalue)') 
+plot2
+
+ggsave(
+  filename = "Figures/others_Cellchat.pdf",
+  plot = plot2,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 40,
+  height = 15,
+  units = c("cm"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+
+
+collapsed_df <- collapsed_df %>%
+  mutate(Group = case_when(
+    grepl("^CON_", sample) ~ "CON",
+    grepl("^T2D_", sample) ~ "T2D",
+    TRUE ~ NA_character_
+  ))
+
+##plot some key variable
+egf_subset <- collapsed_df %>%
+  filter(
+    ligand == "EGF",
+    receptor == "EGFR",
+    source == "EGF+ Myonuclei",
+    target == "Immune"
+  )
+
+cor.test(egf_subset$prob, egf_subset$RdSS2kgFFMInsulin_Pre, method = "pearson")
+
+
+plot3 <- ggplot(egf_subset, aes(x = prob, y = RdSS2kgFFMInsulin_Pre, color = Group)) + 
+  geom_point() +
+geom_smooth(method = lm, color = "black") +  # One regression line for all points
+  stat_cor(method = "pearson", color = "black") +  # One correlation for all points
+  scale_colour_manual(values = c("CON" = "#00AFBB", "T2D" = "#F4a582")) +
+  my_theme + labs(y = 'Rd [(mg/kgFFM/min)]/Insulin',  x = str_wrap("EGF-EGFR Probability from EGF+ myonuclei to Immune cells", width = 30))
+
+ggsave(
+  filename = "Figures/EGF_Immune_RD_I.pdf",
+  plot = plot3,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 13,
+  height = 12,
+  units = c("cm"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+
