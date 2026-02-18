@@ -1,0 +1,1001 @@
+library("WGCNA")
+library("dplyr")
+library('tidyverse')
+library(stats)
+#library(analyze.stuff)
+library(hypeR)
+#library(GEOquery)
+library(stringr)
+library(SummarizedExperiment)
+library(tidyr)
+library(testit)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+library(plotrix)
+library(Hmisc)
+library(readxl)
+library(tools)
+library(RColorBrewer)
+library(UpSetR)
+library(ComplexHeatmap)
+library(viridis)
+library(patchwork)
+library(TMSig)
+library(fgsea)
+
+my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
+                                    axis.text.x = element_text(colour = "black", size = 10, angle =45, hjust = 1),
+                                    axis.text.y = element_text(colour = "black", size = 10),
+                                    axis.title.x = element_text(colour = "black", size = 10),
+                                    axis.title.y = element_text(colour = "black", size = 10),
+)
+
+
+##correlate EGF  score with other cell type gene expression
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data")
+##get cell type proportions
+seurat <- readRDS('Integration/Points.harmony.sct.RDS')
+
+Idents(seurat) = seurat$CellType2
+
+levels <- c('EGF+ Myonuclei', 'MYH7B+ Myonuclei', 'CKM+ Myonuclei',  'MuSC', 'FAP', 'SMC/Pericytes', 'EC', 'Immune')
+levels(seurat) <- levels
+
+tab <- prop.table(table(seurat$CellType2, seurat$orig.ident), margin = 2)
+tab <- as.data.frame(tab)
+colnames(tab) <- c('Cell_Type', 'SampleID', 'Prop')
+tab
+tab <- subset(tab, Cell_Type == 'EGF+ Myonuclei')
+head(tab)
+
+
+normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.Immune.csv", row.names = 1)
+normalized_counts[1:6, 1:6]
+dim(normalized_counts)
+column_order <- colnames(normalized_counts)
+
+
+tab$SampleID <- factor(tab$SampleID, levels = column_order)
+# Reorder the table
+tab <- tab[order(tab$SampleID), ]
+
+
+##Multiply EGF proportion by EGF expression of EGF+ myonuclei to get an output of overall EGF expression
+head(tab)
+
+
+normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.EGF.csv", row.names = 1)
+normalized_counts[1:6, 1:6]
+dim(normalized_counts)
+column_order <- colnames(normalized_counts)
+
+EGF_counts <- normalized_counts[rownames(normalized_counts) %in% "EGF", ]
+EGF_count <- as.data.frame(t(EGF_counts))
+EGF_count$SampleID <- rownames(EGF_count)
+
+tab <- left_join(tab, EGF_count, by = 'SampleID')
+tab$EGF_Score <- tab$Prop * tab$EGF
+
+df2 <- read.csv('Rd.pid.data.csv')
+names(df2)[names(df2) == "Sample"] <- "SampleID"
+
+tab <- left_join(tab, df2, by = 'SampleID')
+
+
+ggplot(tab, aes(x = EGF, y = RdSS2kgFFMInsulin_Pre, label = Group2)) +
+  geom_point(aes(colour = Group2)) +   # Color only points by Group
+  geom_text(hjust=0, vjust=0) +
+  geom_smooth(method = lm, color = "black") +  # One regression line for all points
+  stat_cor(method = "pearson", color = "black") +  # One correlation for all points
+  my_theme + labs(x = 'EGF_Score', y = 'Rd [(mg/kgFFM/min)]/Insulin')
+
+my_dat <- dplyr::summarize(group_by(tab, Group2),
+                           my_mean = mean(EGF_Score , na.rm = TRUE),
+                           my_se = std.error(EGF_Score , na.rm = TRUE))
+
+ggplot() + 
+  geom_bar(data = my_dat,
+           aes(y = my_mean, x = Group2, fill = Group2, 
+               ymin = my_mean - my_se,
+               ymax = my_mean + my_se), position = "dodge", stat="identity", width=0.75) + 
+  scale_fill_manual(values=c( "#00AFBB", "#F4a582"))+ 
+  geom_errorbar(data = my_dat,
+                aes(y = my_mean,  x = Group2, fill = Group2, 
+                    ymin = my_mean - my_se,
+                    ymax = my_mean + my_se), stat="identity", position = "dodge", width=0.75) + 
+  geom_jitter(data = tab, aes(Group2, EGF_Score , fill = Group2), shape = 21, color = "black",
+              position = position_jitterdodge(jitter.height = 0, jitter.width = .2)) +
+  labs(y = "Expression", x = "", fill = "") + my_theme
+
+
+tab$SampleID <- factor(tab$SampleID, levels = column_order)
+# Reorder the table
+tab <- tab[order(tab$SampleID), ]
+
+
+
+
+
+# Path to folder
+folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data/GroupDegs/Pseudobulk DEG/"
+
+
+# List all CSVs that start with "normalized.counts"
+files <- list.files(folder, pattern = "^normalized\\.counts.*\\.csv$", full.names = TRUE)
+
+all_results <- vector("list", length(files))
+names(all_results) <- basename(files)
+
+for (i in seq_along(files)) {
+  f <- files[i]
+  message("Processing: ", f)
+  
+  # --- Parse condition safely: remove prefix and .csv suffix
+  stem <- basename(f)
+  stem_no_ext <- sub("\\.csv$", "", stem, ignore.case = TRUE)
+  # remove "normalized.counts." at the start if present
+  condition <- sub("^normalized\\.counts\\.", "", stem_no_ext, ignore.case = TRUE)
+  # if nothing changed, fall back to stem without extension
+  if (identical(condition, stem_no_ext) || nchar(condition) == 0) condition <- stem_no_ext
+  
+  # --- Read counts (keep column names as-is)
+  normalized_counts <- read.csv(f, row.names = 1, check.names = FALSE)
+  
+  # --- Align proportions to columns
+  tab_sub <- tab[match(colnames(normalized_counts), tab$SampleID), , drop = FALSE]
+  prop_vec <- tab_sub$EGF_Score
+  
+  # --- Optional: drop samples with missing Prop
+  keep <- which(!is.na(prop_vec))
+  if (length(keep) < 3L) {
+    warning("Too few samples with non-NA Prop for ", condition, " — skipping.")
+    next
+  }
+  prop_vec <- prop_vec[keep]
+  expr_mat <- as.matrix(normalized_counts[, keep, drop = FALSE])
+  
+  # --- Kendall correlation row-wise (drop any NAs per gene)
+  kendall_tau <- apply(expr_mat, 1, function(g) {
+    ok <- complete.cases(g, prop_vec)
+    if (sum(ok) < 3L) return(NA_real_)
+    suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$estimate)
+  })
+  
+  kendall_p <- apply(expr_mat, 1, function(g) {
+    ok <- complete.cases(g, prop_vec)
+    if (sum(ok) < 3L) return(NA_real_)
+    suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$p.value)
+  })
+  
+  df <- tibble(
+    gene = rownames(expr_mat),
+    tau  = as.numeric(kendall_tau),
+    pval = as.numeric(kendall_p)
+  ) |>
+    mutate(padj = p.adjust(pval, method = "BH"),
+           condition = condition) |>
+    arrange(desc(abs(tau)))
+  
+  all_results[[i]] <- df
+}
+
+# Combine into one big data frame
+big_df <- bind_rows(all_results) |>
+  relocate(condition, .after = gene)
+
+# Quick sanity checks
+message("Parsed conditions: ", paste(sort(unique(big_df$condition)), collapse = ", "))
+print(head(big_df, 10))
+
+write.csv(big_df, 'EGF+ correlations/EGFscore_correlations.csv')
+big_df2 <- subset(big_df, pval < 0.05)
+big_df2 <- big_df2[, 1:3]
+
+df_wide <- big_df2 %>%
+  pivot_wider(
+    names_from = condition,
+    values_from = tau
+  )
+
+head(df_wide)
+
+write.csv(df_wide, 'EGF+ correlations/EGF_score_correlations_wide.csv')
+
+
+##extract positive and negative genes for each cell type and run pathway analyses on
+
+pos_cor <- function(df, celltype, tau_val){
+  df <- subset(df, condition == celltype)
+  df <- subset(df, df$pval < 0.05 & df$tau > tau_val)
+  df <- df[order(-df$tau),] 
+  return(df)
+}
+
+neg_cor <- function(df, celltype, tau_val){
+  df <- subset(df, condition == celltype)
+  df <- subset(df, df$pval< 0.05 & df$tau < tau_val)
+  df <- df[order(df$tau),] 
+  return(df)
+}
+
+unique(big_df$condition)
+
+EC_pos <- pos_cor(big_df, 'EC', 0)
+EC_neg <- neg_cor(big_df, 'EC', 0)
+
+EGF_pos <- pos_cor(big_df, 'EGF', 0)
+EGF_neg <- neg_cor(big_df, 'EGF', 0)
+
+FAP_pos <- pos_cor(big_df, 'FAP', 0)
+FAP_neg <- neg_cor(big_df, 'FAP', 0)
+
+Immune_pos <- pos_cor(big_df, 'Immune', 0)
+Immune_neg <- neg_cor(big_df, 'Immune', 0)
+
+MuSC_pos <- pos_cor(big_df, 'MuSC', 0)
+MuSC_neg <- neg_cor(big_df, 'MuSC', 0)
+
+MYH7B_pos <- pos_cor(big_df, 'MYH7B', 0)
+MYH7B_neg <- neg_cor(big_df, 'MYH7B', 0)
+
+Myonuclei_pos <- pos_cor(big_df, 'Myonuclei', 0)
+Myonuclei_neg <- neg_cor(big_df, 'Myonuclei', 0)
+
+SMC_Pericytes_pos <- pos_cor(big_df, 'SMC_Pericytes', 0)
+SMC_Pericytes_neg <- neg_cor(big_df, 'SMC_Pericytes', 0)
+
+EC_pos_genes <- EC_pos$gene
+EC_neg_genes <- EC_neg$gene
+
+EGF_pos_genes <- EGF_pos$gene
+EGF_neg_genes <- EGF_neg$gene
+
+FAP_pos_genes <- FAP_pos$gene
+FAP_neg_genes <- FAP_neg$gene
+
+Immune_pos_genes <- Immune_pos$gene
+Immune_neg_genes <- Immune_neg$gene
+
+MuSC_pos_genes <- MuSC_pos$gene
+MuSC_neg_genes <- MuSC_neg$gene
+
+Myonuclei_pos_genes <- Myonuclei_pos$gene
+Myonuclei_neg_genes <- Myonuclei_neg$gene
+
+MYH7B_pos_genes <- MYH7B_pos$gene
+MYH7B_neg_genes <- MYH7B_neg$gene
+
+SMC_Pericytes_pos_genes <- SMC_Pericytes_pos$gene
+SMC_Pericytes_neg_genes <- SMC_Pericytes_neg$gene
+
+Value <- c(
+  (length(EGF_pos_genes)), (length(EGF_neg_genes)), (length(Myonuclei_pos_genes)), (length(Myonuclei_neg_genes)), 
+  (length(MYH7B_pos_genes)), (length(MYH7B_neg_genes)), (length(MuSC_pos_genes)), (length(MuSC_neg_genes)),
+  (length(FAP_pos_genes)), (length(FAP_neg_genes)), (length(SMC_Pericytes_pos_genes)), (length(SMC_Pericytes_neg_genes)),
+  (length(EC_pos_genes)), (length(EC_neg_genes)), (length(Immune_pos_genes)), (length(Immune_neg_genes)))
+
+levels <- c('EGF+ Myonuclei', 'CKM+ Myonuclei',  'MYH7B+ Myonuclei', 'MuSC', 'FAP', 'SMC/Pericytes', 'EC', 'Immune')
+CellType <- rep(levels, each = 2)
+Direction <- rep(c('Pos', 'Neg'), times = 8)
+
+data <- data.frame(Direction, CellType, Value)
+
+
+# Stacked
+plot1 <- ggplot(data, aes(fill=Direction, y=Value, x=reorder(CellType, -Value))) + 
+  geom_bar(position="stack", stat="identity") + my_theme + scale_fill_manual(values=c(  "orchid3", 'seagreen3' )) +
+  labs(y = 'No. of correlating genes with EGF score', x = '' ) + theme(legend.position = "top")
+
+ggsave(
+  filename = "Figures/EGF_score_no_of_genes.pdf",
+  plot = plot1,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 10,
+  height = 10,
+  units = c("cm"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
+
+##get background list for each cell type
+
+background_Immune <- big_df %>% filter(condition == "Immune") %>% pull(gene) %>% unique()
+background_EC <- big_df %>% filter(condition == "EC") %>% pull(gene) %>% unique()
+background_EGF <- big_df %>% filter(condition == "EGF") %>% pull(gene) %>% unique()
+background_FAP <- big_df %>% filter(condition == "FAP") %>% pull(gene) %>% unique()
+background_MuSC <- big_df %>% filter(condition == "MuSC") %>% pull(gene) %>% unique()
+background_Myonuclei <- big_df %>% filter(condition == "Myonuclei") %>% pull(gene) %>% unique()
+background_MYH7B <- big_df %>% filter(condition == "MYH7B") %>% pull(gene) %>% unique()
+background_SMC_Pericytes <- big_df %>% filter(condition == "SMC_Pericytes") %>% pull(gene) %>% unique()
+
+
+##run pathway analysis
+# Vector of all conditions (must match big_df$condition and your *_pos_genes objects)
+cell_types <- c("Immune", "EC", "EGF", "FAP", "MuSC", 
+                "Myonuclei", "MYH7B", "SMC_Pericytes")
+
+# Load MSigDB gene sets once
+geneSets <- gmtPathways("MsigDB/c5.go.bp.v2024.1.Hs.symbols.gmt")
+
+# Loop over each cell type
+for (ct in cell_types) {
+  message("Processing: ", ct)
+  
+  # Background genes for this condition
+  background_genes <- big_df %>% 
+    filter(condition == ct) %>% 
+    pull(gene) %>% 
+    unique()
+  
+  # Filter gene sets by background
+  geneSetsFilt <- filterSets(
+    x = geneSets, 
+    background = background_genes,
+    min_size = 10L
+  )
+  
+  # Calculate overlap proportion
+  setSizes <- lengths(geneSetsFilt)
+  setSizesOld <- lengths(geneSets)[names(geneSetsFilt)]
+  overlapProp <- setSizes / setSizesOld
+  geneSetsFilt <- geneSetsFilt[overlapProp >= 0.8]
+  
+  # Cluster sets to remove redundancy
+  imat <- sparseIncidence(geneSetsFilt)
+  jaccard <- similarity(x = geneSetsFilt)
+  clusterDF <- clusterSets(
+    x = geneSetsFilt, type = "jaccard", 
+    cutoff = 0.85, method = "complete", h = 0.9
+  )
+  
+  # Add metadata for selection
+  clusterDF$overlap_prop <- overlapProp[clusterDF$set]
+  clusterDF$n_char <- nchar(clusterDF$set)
+  o <- with(clusterDF,
+            order(cluster, -set_size, -overlap_prop, n_char, set))
+  clusterDF <- clusterDF[o, ]
+  keepSets <- with(clusterDF, set[!duplicated(cluster)])
+  geneSetsFilt <- geneSetsFilt[keepSets]
+  
+  
+  # Get gene lists you already defined (e.g., Immune_pos_genes)
+  pos_genes <- get(paste0(ct, "_pos_genes"))
+  neg_genes <- get(paste0(ct, "_neg_genes"))
+  
+  # Run hypergeometric enrichment
+  M1 <- hypeR(pos_genes, geneSetsFilt, test="hypergeometric", 
+              background = background_genes, absolute = FALSE, pval = 0.05)
+  M2 <- hypeR(neg_genes, geneSetsFilt, test="hypergeometric", 
+              background = background_genes, absolute = FALSE, pval = 0.05)
+  
+  # Save results to Excel
+  hyp_to_excel(M1, file_path = paste0("EGF+ correlations/ORA after TMsig/", ct, 'EGF_Score', ".pos.BP.xlsx"))
+  hyp_to_excel(M2, file_path = paste0("EGF+ correlations/ORA after TMsig/", ct, 'EGF_Score', ".neg.BP.xlsx"))
+}
+
+
+
+
+EC_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/ECEGF_Score.pos.BP.xlsx')
+EC_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/ECEGF_Score.neg.BP.xlsx')
+SMC_Pericytes_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/SMC_PericytesEGF_Score.pos.BP.xlsx')
+SMC_Pericytes_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/SMC_PericytesEGF_Score.neg.BP.xlsx')
+Immune_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/ImmuneEGF_Score.pos.BP.xlsx')
+Immune_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/ImmuneEGF_Score.neg.BP.xlsx')
+MuSC_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/MuSCEGF_Score.pos.BP.xlsx')
+MuSC_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/MuSCEGF_Score.neg.BP.xlsx')
+FAP_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/FAPEGF_Score.pos.BP.xlsx')
+FAP_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/FAPEGF_Score.neg.BP.xlsx')
+EGF_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/EGFEGF_Score.pos.BP.xlsx')
+EGF_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/EGFEGF_Score.neg.BP.xlsx')
+MYH7B_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/MYH7BEGF_Score.pos.BP.xlsx')
+MYH7B_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/MYH7BEGF_Score.neg.BP.xlsx')
+Myonuclei_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/MyonucleiEGF_Score.pos.BP.xlsx')
+Myonuclei_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/MyonucleiEGF_Score.neg.BP.xlsx')
+
+
+
+get_labels <- function(df){
+  df <- subset(df, df$fdr < 0.4)
+  labels <- df$label[1:3]
+  return(labels)
+}
+
+process_neg <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- df[df$label %in% labels, ]
+  df$log10pvalue <- log10(df$pval)
+  return(df)
+}
+
+process_pos <- function(df, CellType, Direction, labels){
+  df$CellType <- CellType
+  df$Direction <- Direction
+  df <- df[df$label %in% labels, ]
+  df$log10pvalue <- -log10(df$pval)
+  return(df)
+}
+
+labels1 <- get_labels(EGF_BP_neg)
+labels2 <- get_labels(EGF_BP_pos)
+labels3 <- get_labels(Myonuclei_BP_pos )
+labels4 <- get_labels(Myonuclei_BP_neg)
+labels5 <- get_labels(MYH7B_BP_pos )
+labels6 <- get_labels(MYH7B_BP_neg)
+labels7 <- get_labels(MuSC_BP_neg)
+labels8 <- get_labels(MuSC_BP_pos)
+labels9 <- get_labels(FAP_BP_neg)
+labels10 <- get_labels(FAP_BP_pos)
+labels11 <- get_labels(SMC_Pericytes_BP_neg)
+labels12 <- get_labels(SMC_Pericytes_BP_pos)
+labels13 <- get_labels(EC_BP_neg)
+labels14 <- get_labels(EC_BP_pos)
+labels15 <- get_labels(Immune_BP_pos)
+labels16 <- get_labels(Immune_BP_neg)
+
+
+
+
+labels <- unique(c(labels1, labels2, labels3, labels4, labels5, labels6, labels7, labels8, labels9,
+                   labels10, labels11, labels12, labels13, labels14, labels15, labels16))
+labels <- labels[!is.na(labels)]
+
+
+EGF_BP_pos <- process_pos(EGF_BP_pos, 'EGF+ Myonuclei', 'pos', labels)
+EGF_BP_neg <- process_neg(EGF_BP_neg, 'EGF+ Myonuclei', 'neg', labels)
+Myonuclei_BP_pos <- process_pos(Myonuclei_BP_pos, 'CKM+ Myonuclei', 'pos', labels)
+Myonuclei_BP_neg <- process_neg(Myonuclei_BP_neg, 'CKM+ Myonuclei', 'neg', labels)
+MYH7B_BP_pos <- process_pos(MYH7B_BP_pos, 'MYH7B+ Myonuclei', 'pos', labels)
+MYH7B_BP_neg <- process_neg(MYH7B_BP_neg, 'MYH7B+ Myonuclei', 'neg', labels)
+MuSC_BP_pos <- process_pos(MuSC_BP_pos, 'MuSC', 'pos', labels)
+MuSC_BP_neg <- process_neg(MuSC_BP_neg, 'MuSC', 'neg', labels)
+FAP_BP_pos <- process_pos(FAP_BP_pos, 'FAP', 'pos', labels)
+FAP_BP_neg <- process_neg(FAP_BP_neg, 'FAP', 'neg', labels)
+SMC_Pericytes_BP_pos <- process_pos(SMC_Pericytes_BP_pos, 'SMC/Pericytes', 'pos', labels)
+SMC_Pericytes_BP_neg <- process_neg(SMC_Pericytes_BP_neg, 'SMC/Pericytes', 'neg', labels)
+EC_BP_pos <- process_pos(EC_BP_pos, 'EC', 'pos', labels)
+EC_BP_neg <- process_neg(EC_BP_neg, 'EC', 'neg', labels)
+Immune_BP_pos <- process_pos(Immune_BP_pos, 'Immune', 'pos', labels)
+Immune_BP_neg <- process_neg(Immune_BP_neg, 'Immune', 'neg', labels)
+
+
+
+##Make value negative if there is a negative correlation
+
+
+mega <- rbind(EC_BP_pos, EC_BP_neg, SMC_Pericytes_BP_neg, SMC_Pericytes_BP_pos, Immune_BP_neg, Immune_BP_pos, FAP_BP_neg, FAP_BP_pos,
+              MuSC_BP_neg, MuSC_BP_pos, Myonuclei_BP_neg, Myonuclei_BP_pos, MYH7B_BP_neg, MYH7B_BP_pos, EGF_BP_neg, EGF_BP_pos)
+
+
+levels2 <- c('EGF+ Myonuclei', 'MYH7B+ Myonuclei',  'CKM+ Myonuclei',"FAP", 'MuSC', 'SMC/Pericytes', 'EC', 'Immune')
+mega$CellType <- factor(mega$CellType, levels = levels2)
+mega$label <- factor(mega$label, levels = labels)
+
+
+mega$label <- gsub("_", ' ', mega$label)
+mega$label <- tolower(mega$label)
+mega$label <- toTitleCase(mega$label)
+mega$label <- gsub('Gobp', '', mega$label)
+mega$label <- gsub('Rna', 'RNA', mega$label)
+mega$label <- gsub('Dna', 'DNA', mega$label)
+mega$label <- gsub('Mrna', 'mRNA', mega$label)
+mega$label <- gsub('Er', 'ER', mega$label)
+mega$label <- gsub('Atp', 'ATP', mega$label)
+mega$label <- gsub('Atpase', 'ATPase', mega$label)
+mega$label <- gsub('Gtpase', 'GTPase', mega$label)
+mega$label <- gsub('Polymerase Ii', 'Polymerase II', mega$label)
+
+labels <- gsub("_", ' ', labels)
+labels <- tolower(labels)
+labels <- toTitleCase(labels)
+labels <- gsub('Gobp', '', labels)
+labels <- gsub('Rna', 'RNA', labels)
+labels <- gsub('Dna', 'DNA', labels)
+labels <- gsub('Mrna', 'mRNA', labels)
+labels <- gsub('Er', 'ER', labels)
+labels <- gsub('Atp', 'ATP', labels)
+labels <- gsub('Atpase', 'ATPase', labels)
+labels <- gsub('Gtpase', 'GTPase', labels)
+labels <- gsub('Polymerase Ii', 'Polymerase II', labels)
+
+mega$label <- factor(mega$label, levels = labels)
+
+mega <- mega %>%
+  mutate(category = case_when(
+    fdr <= 0.2 ~ "*",
+    fdr >  0.2 ~ ""
+  ))
+
+head(mega)
+
+mega <- subset(mega, fdr < 0.4)
+
+write.csv(mega, 'EGF+ correlations/EGF_Score_combined_pathways.csv')
+
+
+plot2 <-  ggplot(data = mega, mapping = aes(x = CellType, y = label, size = overlap)) +
+  geom_point(aes(colour = log10pvalue)) +  # Plot points colored by -log10(pvalue)
+  geom_text(aes(label = category), vjust = 0.75, size = 5, color = "white") +
+  theme_classic() +
+  scale_colour_gradient2(
+    high = 'seagreen3', low = "orchid3", mid = 'white', midpoint = 0, name = "signed log10(pvalue)"
+  ) +
+  my_theme +
+  labs(x = '', y = '') 
+
+
+ ggsave(
+   filename = "Figures/EGF_score_pathways.pdf",
+   plot = plot2,
+   device = pdf,
+   path = NULL,
+   scale = 1,
+   width = 20,
+   height = 17,
+   units = c("cm"),
+   dpi = 300,
+   limitsize = TRUE,
+   bg = NULL,
+   create.dir = FALSE
+ )
+
+ 
+ ####Make heatmaps of interesting genes
+ normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.Immune.csv", row.names = 1)
+ genes <- c(Immune_BP_pos$hits[1])
+ genes <- strsplit(genes, ",\\s*")
+ genes <- unlist(genes)
+ genes <- gsub(' ', '', genes)
+ 
+ 
+ #data_mod <- normalized_counts[rownames(normalized_counts) %in% genes, ]
+ 
+ ##make annotation df
+ 
+tab <- tab %>% remove_rownames %>% column_to_rownames(var="X")
+cols <- c('EGF_Score', 'Group2')
+tab2 <- tab[, colnames(tab) %in% cols]
+head(tab2)
+
+#names(tab2)[names(tab2) == "RdSS2kgFFMInsulin_Pre"] <- "Rd_I"
+ordered_samples <- rownames(tab)[order(tab$EGF_Score)] 
+
+ ann_colors <- list(Group2 = c("CON" = "#87CEFA",
+                              'T2D' = "#EC7014"),
+                    EGF_Score = c(brewer.pal(50, "OrRd")) )
+ 
+ sig_norm <- data.frame(normalized_counts) %>%
+   rownames_to_column(var = "gene") %>%
+   dplyr::filter(gene %in% genes)
+ 
+ 
+ 
+ 
+ 
+ sig_norm2 <- sig_norm %>% remove_rownames %>% column_to_rownames('gene')
+ df_ordered <- sig_norm2[, ordered_samples]
+ 
+ reversed_colors <- rev(hcl.colors(50, palette = "PiYg"))
+ 
+ pheatmap::pheatmap(df_ordered , 
+                    color = reversed_colors,
+                    cluster_rows = T, 
+                    cluster_cols = F,
+                    show_rownames = T,
+                    show_colnames = F,
+                    annotation = tab2,
+                    annotation_colors = ann_colors,
+                    border_color = NA, 
+                    fontsize = 10, 
+                    scale = "row", 
+                    fontsize_row = 10, 
+                    height = 20) 
+ 
+ 
+ plot3 <- pheatmap::pheatmap(df_ordered , 
+                             hcl.colors(50, 'PiYg'),
+                             cluster_rows = T, 
+                             cluster_cols = F,
+                             show_rownames = T,
+                             show_colnames = F,
+                             annotation = tab2,
+                             annotation_colors = ann_colors,
+                             border_color = NA, 
+                             fontsize = 10, 
+                             scale = "row", 
+                             fontsize_row = 10, 
+                             height = 20) 
+ 
+ 
+ 
+ 
+ ggsave(
+   filename = "Figures/Viral_process_Immune_EGF_score_geneheatmap.pdf",
+   plot = plot3,
+   device = pdf,
+   path = NULL,
+   scale = 1,
+   width = 15,
+   height = 13,
+   units = c("cm"),
+   dpi = 600,
+   limitsize = TRUE,
+   bg = NULL,
+   create.dir = FALSE
+ )
+ 
+ ##make interesting heatmaps
+ 
+ normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.EC.csv", row.names = 1)
+ genes <- c(EC_BP_pos$hits[3])
+ genes <- strsplit(genes, ",\\s*")
+ genes <- unlist(genes)
+ genes <- gsub(' ', '', genes)
+ 
+ 
+ #data_mod <- normalized_counts[rownames(normalized_counts) %in% genes, ]
+ 
+ sig_norm <- data.frame(normalized_counts) %>%
+   rownames_to_column(var = "gene") %>%
+   dplyr::filter(gene %in% genes)
+ 
+
+ sig_norm2 <- sig_norm %>% remove_rownames %>% column_to_rownames('gene')
+ df_ordered <- sig_norm2[, ordered_samples]
+ 
+ reversed_colors <- rev(hcl.colors(50, palette = "PiYg"))
+ 
+ 
+ plot4 <- pheatmap::pheatmap(df_ordered , 
+                             hcl.colors(50, 'PiYg'),
+                             cluster_rows = T, 
+                             cluster_cols = F,
+                             show_rownames = T,
+                             show_colnames = F,
+                             annotation = tab2,
+                             annotation_colors = ann_colors,
+                             border_color = NA, 
+                             fontsize = 10, 
+                             scale = "row", 
+                             fontsize_row = 5, 
+                             height = 20) 
+ 
+ plot4
+ 
+ 
+ 
+ ggsave(
+   filename = "Figures/Apoptosis_EC_EGF_score_geneheatmap.pdf",
+   plot = plot4,
+   device = pdf,
+   path = NULL,
+   scale = 1,
+   width = 15,
+   height = 30,
+   units = c("cm"),
+   dpi = 600,
+   limitsize = TRUE,
+   bg = NULL,
+   create.dir = FALSE
+ )
+ 
+ ##make interesting heatmap 
+ normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.MYH7B.csv", row.names = 1)
+ genes <- c(MYH7B_BP_neg$hits[1])
+ genes <- strsplit(genes, ",\\s*")
+ genes <- unlist(genes)
+ genes <- gsub(' ', '', genes)
+ 
+ 
+ #data_mod <- normalized_counts[rownames(normalized_counts) %in% genes, ]
+ 
+ sig_norm <- data.frame(normalized_counts) %>%
+   rownames_to_column(var = "gene") %>%
+   dplyr::filter(gene %in% genes)
+ 
+ 
+ 
+ 
+ 
+ sig_norm2 <- sig_norm %>% remove_rownames %>% column_to_rownames('gene')
+ df_ordered <- sig_norm2[, ordered_samples]
+ 
+ reversed_colors <- rev(hcl.colors(50, palette = "PiYg"))
+ 
+ 
+ plot5 <- pheatmap::pheatmap(df_ordered , 
+                             hcl.colors(50, 'PiYg'),
+                             cluster_rows = T, 
+                             cluster_cols = F,
+                             show_rownames = T,
+                             show_colnames = F,
+                             annotation = tab2,
+                             annotation_colors = ann_colors,
+                             border_color = NA, 
+                             fontsize = 10, 
+                             scale = "row", 
+                             fontsize_row = 10, 
+                             height = 20) 
+ 
+ plot5
+ 
+ 
+ 
+ ggsave(
+   filename = "Figures/Amino_acid_catabolic_MYH7B_EGF_score_geneheatmap.pdf",
+   plot = plot5,
+   device = pdf,
+   path = NULL,
+   scale = 1,
+   width = 15,
+   height = 8,
+   units = c("cm"),
+   dpi = 600,
+   limitsize = TRUE,
+   bg = NULL,
+   create.dir = FALSE
+ )
+ 
+ 
+ 
+ 
+ 
+ 
+####repeat correlation analyses for myeloid and lymphoid cells
+ 
+ # Path to folder
+ folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data/Immune sub clustering/"
+ 
+ 
+ # List all CSVs that start with "normalized.counts"
+ files <- list.files(folder, pattern = "^normalized\\.counts.*\\.csv$", full.names = TRUE)
+ 
+ all_results <- vector("list", length(files))
+ names(all_results) <- basename(files)
+ 
+ for (i in seq_along(files)) {
+   f <- files[i]
+   message("Processing: ", f)
+   
+   # --- Parse condition safely: remove prefix and .csv suffix
+   stem <- basename(f)
+   stem_no_ext <- sub("\\.csv$", "", stem, ignore.case = TRUE)
+   # remove "normalized.counts." at the start if present
+   condition <- sub("^normalized\\.counts\\.", "", stem_no_ext, ignore.case = TRUE)
+   # if nothing changed, fall back to stem without extension
+   if (identical(condition, stem_no_ext) || nchar(condition) == 0) condition <- stem_no_ext
+   
+   # --- Read counts (keep column names as-is)
+   normalized_counts <- read.csv(f, row.names = 1, check.names = FALSE)
+   
+   # --- Align proportions to columns
+   tab_sub <- tab[match(colnames(normalized_counts), tab$SampleID), , drop = FALSE]
+   prop_vec <- tab_sub$EGF_Score
+   
+   # --- Optional: drop samples with missing Prop
+   keep <- which(!is.na(prop_vec))
+   if (length(keep) < 3L) {
+     warning("Too few samples with non-NA Prop for ", condition, " — skipping.")
+     next
+   }
+   prop_vec <- prop_vec[keep]
+   expr_mat <- as.matrix(normalized_counts[, keep, drop = FALSE])
+   
+   # --- Kendall correlation row-wise (drop any NAs per gene)
+   kendall_tau <- apply(expr_mat, 1, function(g) {
+     ok <- complete.cases(g, prop_vec)
+     if (sum(ok) < 3L) return(NA_real_)
+     suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$estimate)
+   })
+   
+   kendall_p <- apply(expr_mat, 1, function(g) {
+     ok <- complete.cases(g, prop_vec)
+     if (sum(ok) < 3L) return(NA_real_)
+     suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$p.value)
+   })
+   
+   df <- tibble(
+     gene = rownames(expr_mat),
+     tau  = as.numeric(kendall_tau),
+     pval = as.numeric(kendall_p)
+   ) |>
+     mutate(padj = p.adjust(pval, method = "BH"),
+            condition = condition) |>
+     arrange(desc(abs(tau)))
+   
+   all_results[[i]] <- df
+ }
+ 
+ # Combine into one big data frame
+ big_df <- bind_rows(all_results) |>
+   relocate(condition, .after = gene)
+ 
+ # Quick sanity checks
+ message("Parsed conditions: ", paste(sort(unique(big_df$condition)), collapse = ", "))
+ print(head(big_df, 10))
+ 
+ write.csv(big_df, 'EGF+ correlations/EGFscore_correlations_immune_resolution.csv')
+ big_df2 <- subset(big_df, pval < 0.05)
+ big_df2 <- big_df2[, 1:3]
+ 
+ df_wide <- big_df2 %>%
+   pivot_wider(
+     names_from = condition,
+     values_from = tau
+   )
+ 
+ head(df_wide)
+ 
+ write.csv(df_wide, 'EGF+ correlations/EGF_score_correlations_wide_immune_resolution.csv')
+ 
+ # Vector of all conditions (must match big_df$condition and your *_pos_genes objects)
+ 
+ pos_cor <- function(df, celltype, tau_val){
+   df <- subset(df, condition == celltype)
+   df <- subset(df, df$pval < 0.05 & df$tau > tau_val)
+   df <- df[order(-df$tau),] 
+   return(df)
+ }
+ 
+ neg_cor <- function(df, celltype, tau_val){
+   df <- subset(df, condition == celltype)
+   df <- subset(df, df$pval< 0.05 & df$tau < tau_val)
+   df <- df[order(df$tau),] 
+   return(df)
+ }
+ 
+ unique(big_df$condition)
+ 
+ Myeloid_pos <- pos_cor(big_df, 'Myeloid', 0)
+ Myeloid_neg <- neg_cor(big_df, 'Myeloid', 0)
+ 
+ Lymphoid_pos <- pos_cor(big_df, 'Lymphoid', 0)
+ Lymphoid_neg <- neg_cor(big_df, 'Lymphoid', 0)
+ 
+ Myeloid_pos_genes <- Myeloid_pos$gene
+ Myeloid_neg_genes <- Myeloid_neg$gene
+ 
+ Lymphoid_pos_genes <- Lymphoid_pos$gene
+ Lymphoid_neg_genes <- Lymphoid_neg$gene
+ 
+ background_Lymphoid <- big_df %>% filter(condition == "Lymphoid") %>% pull(gene) %>% unique()
+ background_Myeloid <- big_df %>% filter(condition == "Myeloid") %>% pull(gene) %>% unique()
+ 
+ 
+ cell_types <- c('Myeloid', 'Lymphoid')
+ 
+ # Load MSigDB gene sets once
+ geneSets <- gmtPathways("MsigDB/c5.go.bp.v2024.1.Hs.symbols.gmt")
+ 
+ # Loop over each cell type
+ for (ct in cell_types) {
+   message("Processing: ", ct)
+   
+   # Background genes for this condition
+   background_genes <- big_df %>% 
+     filter(condition == ct) %>% 
+     pull(gene) %>% 
+     unique()
+   
+   # Filter gene sets by background
+   geneSetsFilt <- filterSets(
+     x = geneSets, 
+     background = background_genes,
+     min_size = 10L
+   )
+   
+   # Calculate overlap proportion
+   setSizes <- lengths(geneSetsFilt)
+   setSizesOld <- lengths(geneSets)[names(geneSetsFilt)]
+   overlapProp <- setSizes / setSizesOld
+   geneSetsFilt <- geneSetsFilt[overlapProp >= 0.8]
+   
+   # Cluster sets to remove redundancy
+   imat <- sparseIncidence(geneSetsFilt)
+   jaccard <- similarity(x = geneSetsFilt)
+   clusterDF <- clusterSets(
+     x = geneSetsFilt, type = "jaccard", 
+     cutoff = 0.85, method = "complete", h = 0.9
+   )
+   
+   # Add metadata for selection
+   clusterDF$overlap_prop <- overlapProp[clusterDF$set]
+   clusterDF$n_char <- nchar(clusterDF$set)
+   o <- with(clusterDF,
+             order(cluster, -set_size, -overlap_prop, n_char, set))
+   clusterDF <- clusterDF[o, ]
+   keepSets <- with(clusterDF, set[!duplicated(cluster)])
+   geneSetsFilt <- geneSetsFilt[keepSets]
+   
+   
+   # Get gene lists you already defined (e.g., Immune_pos_genes)
+   pos_genes <- get(paste0(ct, "_pos_genes"))
+   neg_genes <- get(paste0(ct, "_neg_genes"))
+   
+   # Run hypergeometric enrichment
+   M1 <- hypeR(pos_genes, geneSetsFilt, test="hypergeometric", 
+               background = background_genes, absolute = FALSE, pval = 0.05)
+   M2 <- hypeR(neg_genes, geneSetsFilt, test="hypergeometric", 
+               background = background_genes, absolute = FALSE, pval = 0.05)
+   
+   # Save results to Excel
+   hyp_to_excel(M1, file_path = paste0("EGF+ correlations/ORA after TMsig/", ct, 'EGF_Score', ".pos.BP.xlsx"))
+   hyp_to_excel(M2, file_path = paste0("EGF+ correlations/ORA after TMsig/", ct, 'EGF_Score', ".neg.BP.xlsx"))
+ }
+ 
+ 
+ Lymphoid_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/LymphoidEGF_Score.pos.BP.xlsx')
+ Lymphoid_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/LymphoidEGF_Score.neg.BP.xlsx')
+ Myeloid_BP_pos <- read_excel('EGF+ correlations/ORA after TMsig/MyeloidEGF_Score.pos.BP.xlsx')
+ Myeloid_BP_neg <- read_excel('EGF+ correlations/ORA after TMsig/MyeloidEGF_Score.neg.BP.xlsx')
+ 
+ labels1 <- get_labels(Lymphoid_BP_neg)
+ labels2 <- get_labels(Lymphoid_BP_pos)
+ labels3 <- get_labels(Myeloid_BP_pos )
+ labels4 <- get_labels(Myeloid_BP_neg)
+ 
+ labels <- unique(c(labels1, labels2, labels3, labels4))
+ labels <- labels[!is.na(labels)]
+ 
+ 
+ Lymphoid_BP_pos <- process_pos(Lymphoid_BP_pos, 'Lymphoid', 'pos', labels)
+ Lymphoid_BP_neg <- process_neg(Lymphoid_BP_neg, 'Lymphoid', 'neg', labels)
+ Myeloid_BP_pos <- process_pos(Myeloid_BP_pos, 'Myeloid', 'pos', labels)
+ Myeloid_BP_neg <- process_neg(Myeloid_BP_neg, 'Myeloid', 'neg', labels)
+
+ 
+ ##Make value negative if there is a negative correlation
+ 
+ 
+ mega <- rbind(Lymphoid_BP_pos, Lymphoid_BP_neg, Myeloid_BP_neg, Myeloid_BP_pos)
+
+ mega$label <- factor(mega$label, levels = labels)
+ 
+ 
+ mega$label <- gsub("_", ' ', mega$label)
+ mega$label <- tolower(mega$label)
+ mega$label <- toTitleCase(mega$label)
+ mega$label <- gsub('Gobp', '', mega$label)
+ mega$label <- gsub('Rna', 'RNA', mega$label)
+ mega$label <- gsub('Dna', 'DNA', mega$label)
+ mega$label <- gsub('Mrna', 'mRNA', mega$label)
+ mega$label <- gsub('Er', 'ER', mega$label)
+ mega$label <- gsub('Atp', 'ATP', mega$label)
+ mega$label <- gsub('Atpase', 'ATPase', mega$label)
+ mega$label <- gsub('Gtpase', 'GTPase', mega$label)
+ mega$label <- gsub('Polymerase Ii', 'Polymerase II', mega$label)
+ 
+ labels <- gsub("_", ' ', labels)
+ labels <- tolower(labels)
+ labels <- toTitleCase(labels)
+ labels <- gsub('Gobp', '', labels)
+ labels <- gsub('Rna', 'RNA', labels)
+ labels <- gsub('Dna', 'DNA', labels)
+ labels <- gsub('Mrna', 'mRNA', labels)
+ labels <- gsub('Er', 'ER', labels)
+ labels <- gsub('Atp', 'ATP', labels)
+ labels <- gsub('Atpase', 'ATPase', labels)
+ labels <- gsub('Gtpase', 'GTPase', labels)
+ labels <- gsub('Polymerase Ii', 'Polymerase II', labels)
+ 
+ mega$label <- factor(mega$label, levels = labels)
+ 
+ mega <- mega %>%
+   mutate(category = case_when(
+     fdr <= 0.2 ~ "*",
+     fdr >  0.2 ~ ""
+   ))
+ 
+ head(mega)
+ 
+ mega <- subset(mega, fdr < 0.4)
+
+ write.csv(mega, 'EGF+ correlations/Immune.resolution.pathways.csv') 
+ 
