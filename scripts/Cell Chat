@@ -214,7 +214,7 @@ head(collapsed_df)
 # Filter interactions with mostly zero values
 filtered <- collapsed_df %>%
   group_by(source, target, ligand, receptor) %>%
-  filter(sum(prob > 0, na.rm = TRUE) >= 5)  # Keep only if ≥ 5 non-zero prob values
+  filter(sum(prob > 0, na.rm = TRUE) >= 6)  # Keep only if ≥ 6 non-zero prob values
 dim(filtered)
 
 # Step 2: Correlation test per interaction (across samples)
