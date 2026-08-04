@@ -37,7 +37,7 @@ Idents(seurat) = seurat$CellType2
 ##create cell chat
 cellchat <- createCellChat(object = seurat, group.by = "ident", assay = "RNA")
 
-CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+CellChatDB <- CellChatDB.human 
 showDatabaseCategory(CellChatDB)
 
 # use all CellChatDB for cell-cell communication analysis
@@ -71,7 +71,7 @@ names(cellchat.list) <- names(seurat.list)
 saveRDS(cellchat.list, 'cellchat.list.RDS')
 
 ##this function will calculate non-significant interactions and access pval, 
-##you need to add bootstrapping via computeCommunProb by setting the raw.use = TRUE 
+## add bootstrapping via computeCommunProb by setting the raw.use = TRUE 
 #and including the number of bootstraps with nboot.
 cellchat.list <- lapply(names(seurat.list), function(s) {
   seu <- seurat.list[[s]]
@@ -92,7 +92,7 @@ names(cellchat.list) <- names(seurat.list)
 saveRDS(cellchat.list, 'cellchat.list.V2.RDS')
 cellchat.list <- readRDS('cellchat.list.V2.RDS')
 
-
+##organize results
 
 comm_list <- lapply(names(cellchat.list), function(samp) {
   mat <- cellchat.list[[samp]]@net$prob
@@ -189,20 +189,6 @@ VlnPlot(seurat, features = 'EGF', split.by = 'Group', pt.size = 0)
 #run cor.test() only if enough finite, non-NA values exist (e.g., at least 3 paired observations):
 # Group by source, target, ligand, and receptor
 
-
-nested_corr <- comm_all %>%
-  group_by(source, target, ligand, receptor) %>%
-  nest() %>%
-  mutate(
-    n = map_int(data, ~ sum(is.finite(.x$prob) & is.finite(.x$RdSS2kgFFMInsulin_Pre))),
-    cor_test = map2(data, n, ~ if (.y >= 3) cor.test(.x$prob, .x$RdSS2kgFFMInsulin_Pre, method = "kendall") else NA),
-    estimate = map_dbl(cor_test, ~ if (is.list(.x)) .x$estimate else NA_real_),
-    p.value  = map_dbl(cor_test, ~ if (is.list(.x)) .x$p.value  else NA_real_)
-  ) %>%
-  dplyr::select(source, target, ligand, receptor, n, estimate, p.value) %>%
-  arrange(p.value)
-head(nested_corr)
-
 # Step 1: Average or collapse per interaction per sample
 collapsed_df <- comm_all %>%
   group_by(source, target, ligand, receptor, sample) %>%
@@ -228,8 +214,9 @@ head(collapsed_df)
 # Filter interactions with mostly zero values
 filtered <- collapsed_df %>%
   group_by(source, target, ligand, receptor) %>%
-  filter(sum(prob > 0, na.rm = TRUE) >= 3)  # Keep only if ≥ 3 non-zero prob values
+  filter(sum(prob > 0, na.rm = TRUE) >= 5)  # Keep only if ≥ 5 non-zero prob values
 dim(filtered)
+
 # Step 2: Correlation test per interaction (across samples)
 nested_corr <- filtered  %>%
   group_by(source, target, ligand, receptor) %>%
