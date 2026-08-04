@@ -134,57 +134,6 @@ df <-  unique(seurat@meta.data[,  colnames(seurat@meta.data) %in% cols]  %>% rem
 comm_all <- left_join(comm_all, df, by = 'orig.ident')
 head(comm_all)
 
-
-
-EGF <- subset(comm_all, ligand == 'EGF')
-str(EGF)
-
-EGF2 <- subset(EGF, source == 'EGF+ Myonuclei')
-
-# 1. Subset just the rows of interest (optional, or skip if you want all)
-# For example: only receptor == "EGFR"
-subset_df <- EGF2 %>%
-  filter(receptor == "EGFR") # add more filters as needed (e.g. ligand == "EGF")
-
-
-
-# 2. Nest by receptor and target
-nested_df <- subset_df %>%
-  group_by(receptor, target) %>%
-  nest()
-
-# 3. Run correlation on each subgroup
-results <- nested_df %>%
-  mutate(cor_test = map(data, ~ cor.test(.x$prob, .x$RdSS2kgFFMInsulin_Pre, method = "pearson"))) %>%
-  mutate(
-    estimate = map_dbl(cor_test, ~ .x$estimate),
-    p.value  = map_dbl(cor_test, ~ .x$p.value)
-  ) %>%
-  dplyr::select(receptor, target, estimate, p.value)
-
-# View results
-print(results)
-
-plot_df <- EGF2 %>%
-  filter(target == "Immune", receptor == "EGFR", ligand == "EGF")
-
-# Create the scatter plot
-ggplot(plot_df, aes(x = RdSS2kgFFMInsulin_Pre, y = prob)) +
-  geom_point(size = 3, alpha = 0.8) +
-  geom_smooth(method = "lm", se = TRUE, color = "blue", linetype = "dashed") +
-  labs(
-    title = "EGF–EGFR Signaling to Immune Cells",
-    x = "Insulin-Stimulated Glucose Disposal (RdSS2kgFFMInsulin_Pre)",
-    y = "Interaction Probability (prob)"
-  ) +
-  theme_minimal(base_size = 14)
-
-
-
-VlnPlot(seurat, features = 'EGFR', split.by = 'Group', pt.size = 0) 
-VlnPlot(seurat, features = 'EGF', split.by = 'Group', pt.size = 0) 
-
-
 ##run correlations for all different interactions
 #run cor.test() only if enough finite, non-NA values exist (e.g., at least 3 paired observations):
 # Group by source, target, ligand, and receptor
