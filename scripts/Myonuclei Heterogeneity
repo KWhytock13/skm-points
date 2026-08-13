@@ -67,6 +67,27 @@ seurat <- ScaleData(seurat, features = all.genes)
 ####Subset with all myonuclei
 Myo <- subset(seurat, idents = c('CKM+ Myonuclei', 'EGF+ Myonuclei', 'MYH7B+ Myonuclei'))
 
+##create scatterplots
+P1 <- FeatureScatter(Myo, feature1 = 'MYH7', feature2 = 'MYH2', pt.size = 0.1, cols = pair)
+P2 <- FeatureScatter(Myo, feature1 = 'MYH7', feature2 = 'MYH1',  pt.size = 0.1, cols = pair)
+plot1 <- ggarrange(P1, P2, common.legend = TRUE, legend = "bottom")
+plot1
+
+ggsave(
+  filename = "Figures/MYH.scatters.pdf",
+  plot = plot1,
+  device = pdf,
+  path = NULL,
+  scale = 1,
+  width = 20,
+  height = 10,
+  units = c("cm"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL,
+  create.dir = FALSE
+)
+
 ###Run TMSig ORA on myonuclei populations
 EGF_Myo <- FindMarkers(seurat, ident.1 = "EGF+ Myonuclei", ident.2 = c("CKM+ Myonuclei", "MYH7B+ Myonuclei"), min.pct = 0.1,  logfc.threshold = 0.25, only.pos = FALSE)
 write.csv(EGF_Myo, 'Myonuclei_exploration/EGF_Myo_DEGS.csv')
