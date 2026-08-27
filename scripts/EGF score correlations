@@ -1,28 +1,13 @@
-library("WGCNA")
-library("dplyr")
-library('tidyverse')
-library(stats)
-#library(analyze.stuff)
-library(hypeR)
-#library(GEOquery)
-library(stringr)
-library(SummarizedExperiment)
-library(tidyr)
-library(testit)
+library(tidyverse)
+library(Seurat)
 library(ggpubr)
-library(rstatix)
-library(corrplot)
 library(plotrix)
-library(Hmisc)
-library(readxl)
-library(tools)
-library(RColorBrewer)
-library(UpSetR)
-library(ComplexHeatmap)
-library(viridis)
-library(patchwork)
+library(hypeR)
 library(TMSig)
 library(fgsea)
+library(readxl)
+library(RColorBrewer)
+library(tools)
 
 my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
                                     axis.text.x = element_text(colour = "black", size = 10, angle =45, hjust = 1),
@@ -32,8 +17,8 @@ my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black
 )
 
 
-##correlate EGF  score with other cell type gene expression
-setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data")
+##correlate EGF+ myonuclei proportion with other cell type gene expression
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data")
 ##get cell type proportions
 seurat <- readRDS('Integration/Points.harmony.sct.RDS')
 
@@ -114,82 +99,248 @@ tab$SampleID <- factor(tab$SampleID, levels = column_order)
 tab <- tab[order(tab$SampleID), ]
 
 
-
-
-
 # Path to folder
-folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data/GroupDegs/Pseudobulk DEG/"
+folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data/GroupDegs/Pseudobulk DEG/"
 
-
-# List all CSVs that start with "normalized.counts"
-files <- list.files(folder, pattern = "^normalized\\.counts.*\\.csv$", full.names = TRUE)
+# List all pseudobulk count files
+files <- list.files(
+  folder,
+  pattern = "^normalized\\.counts.*\\.csv$",
+  full.names = TRUE
+)
 
 all_results <- vector("list", length(files))
 names(all_results) <- basename(files)
 
+# Number of permutations
+n_permutations <- 1000
+
+# Optional: makes permutations reproducible
+set.seed(123)
+
 for (i in seq_along(files)) {
+  
   f <- files[i]
   message("Processing: ", f)
   
-  # --- Parse condition safely: remove prefix and .csv suffix
+  # Get cell-type name from filename
+
   stem <- basename(f)
   stem_no_ext <- sub("\\.csv$", "", stem, ignore.case = TRUE)
-  # remove "normalized.counts." at the start if present
-  condition <- sub("^normalized\\.counts\\.", "", stem_no_ext, ignore.case = TRUE)
-  # if nothing changed, fall back to stem without extension
-  if (identical(condition, stem_no_ext) || nchar(condition) == 0) condition <- stem_no_ext
   
-  # --- Read counts (keep column names as-is)
-  normalized_counts <- read.csv(f, row.names = 1, check.names = FALSE)
+  condition <- sub(
+    "^normalized\\.counts\\.",
+    "",
+    stem_no_ext,
+    ignore.case = TRUE
+  )
   
-  # --- Align proportions to columns
-  tab_sub <- tab[match(colnames(normalized_counts), tab$SampleID), , drop = FALSE]
+
+  # Read pseudobulk expression
+
+  normalized_counts <- read.csv(
+    f,
+    row.names = 1,
+    check.names = FALSE
+  )
+  
+  # Align EGF score/proportion to expression matrix columns
+  tab_sub <- tab[
+    match(colnames(normalized_counts), as.character(tab$SampleID)),
+    ,
+    drop = FALSE
+  ]
+  
   prop_vec <- tab_sub$EGF_Score
   
-  # --- Optional: drop samples with missing Prop
+  # Remove samples missing EGF score
   keep <- which(!is.na(prop_vec))
+  
   if (length(keep) < 3L) {
-    warning("Too few samples with non-NA Prop for ", condition, " — skipping.")
+    warning(
+      "Too few samples with non-NA EGF_Score for ",
+      condition,
+      " — skipping."
+    )
     next
   }
-  prop_vec <- prop_vec[keep]
-  expr_mat <- as.matrix(normalized_counts[, keep, drop = FALSE])
   
-  # --- Kendall correlation row-wise (drop any NAs per gene)
+  prop_vec <- prop_vec[keep]
+  
+  expr_mat <- as.matrix(
+    normalized_counts[, keep, drop = FALSE]
+  )
+  
+
+  # Observed Kendall correlation
+
   kendall_tau <- apply(expr_mat, 1, function(g) {
+    
     ok <- complete.cases(g, prop_vec)
-    if (sum(ok) < 3L) return(NA_real_)
-    suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$estimate)
+    
+    if (sum(ok) < 3L)
+      return(NA_real_)
+    
+    suppressWarnings(
+      cor.test(
+        g[ok],
+        prop_vec[ok],
+        method = "kendall"
+      )$estimate
+    )
   })
   
   kendall_p <- apply(expr_mat, 1, function(g) {
+    
     ok <- complete.cases(g, prop_vec)
-    if (sum(ok) < 3L) return(NA_real_)
-    suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$p.value)
+    
+    if (sum(ok) < 3L)
+      return(NA_real_)
+    
+    suppressWarnings(
+      cor.test(
+        g[ok],
+        prop_vec[ok],
+        method = "kendall"
+      )$p.value
+    )
   })
   
+
+  # Initial results
+
   df <- tibble(
     gene = rownames(expr_mat),
-    tau  = as.numeric(kendall_tau),
+    tau = as.numeric(kendall_tau),
     pval = as.numeric(kendall_p)
-  ) |>
-    mutate(padj = p.adjust(pval, method = "BH"),
-           condition = condition) |>
+  )
+  
+
+  # Only calculate empirical p-values for nominal P < 0.05
+
+  sig_idx <- which(!is.na(df$pval) & df$pval < 0.05)
+  
+  # Initialize empirical p-value column
+  empirical_p <- rep(NA_real_, nrow(df))
+  
+  if (length(sig_idx) > 0) {
+    
+    message(
+      "  Running permutations for ",
+      length(sig_idx),
+      " genes in ",
+      condition
+    )
+    
+    # Only keep significant genes for permutation
+    sig_expr <- expr_mat[sig_idx, , drop = FALSE]
+    
+    observed_tau <- df$tau[sig_idx]
+    
+    # Matrix:
+    # rows = permutations
+    # columns = genes
+    permuted_correlations <- matrix(
+      NA_real_,
+      nrow = n_permutations,
+      ncol = nrow(sig_expr)
+    )
+    
+
+    # Permutations
+
+    for (p in seq_len(n_permutations)) {
+      
+      permuted_prop <- sample(prop_vec)
+      
+      permuted_correlations[p, ] <- apply(
+        sig_expr,
+        1,
+        function(g) {
+          
+          ok <- complete.cases(g, permuted_prop)
+          
+          if (sum(ok) < 3L)
+            return(NA_real_)
+          
+          suppressWarnings(
+            cor(
+              g[ok],
+              permuted_prop[ok],
+              method = "kendall"
+            )
+          )
+        }
+      )
+    }
+    
+
+    # Empirical two-sided p-values
+
+    empirical_p_sig <- sapply(
+      seq_along(observed_tau),
+      function(j) {
+        
+        perm_tau <- permuted_correlations[, j]
+        
+        perm_tau <- perm_tau[!is.na(perm_tau)]
+        
+        if (length(perm_tau) == 0)
+          return(NA_real_)
+        
+        # +1 correction prevents P = 0
+        (
+          sum(abs(perm_tau) >= abs(observed_tau[j])) + 1
+        ) /
+          (
+            length(perm_tau) + 1
+          )
+      }
+    )
+    
+    empirical_p[sig_idx] <- empirical_p_sig
+  }
+
+  # Add empirical p-values and multiple-testing corrections
+
+  df <- df %>%
+    mutate(
+      empirical_p = empirical_p,
+      
+      # FDR based on nominal Kendall p-values
+      padj = p.adjust(
+        pval,
+        method = "BH"
+      ),
+      
+      # Optional empirical FDR
+      empirical_padj = p.adjust(
+        empirical_p,
+        method = "BH"
+      ),
+      
+      condition = condition
+    ) %>%
     arrange(desc(abs(tau)))
   
   all_results[[i]] <- df
 }
 
-# Combine into one big data frame
-big_df <- bind_rows(all_results) |>
+# Combine all cell types
+
+big_df <- bind_rows(all_results) %>%
   relocate(condition, .after = gene)
 
-# Quick sanity checks
-message("Parsed conditions: ", paste(sort(unique(big_df$condition)), collapse = ", "))
-print(head(big_df, 10))
+head(big_df)
 
-write.csv(big_df, 'EGF+ correlations/EGFscore_correlations.csv')
-big_df2 <- subset(big_df, pval < 0.05)
+
+
+
+
+
+write.csv(big_df, 'EGF+ correlations/EGFscore_correlations.V2.csv')
+big_df <- read.csv('EGF+ correlations/EGFscore_correlations.V2.csv', row.names = 1)
+big_df2 <- subset(big_df, empirical_p < 0.05)
 big_df2 <- big_df2[, 1:3]
 
 df_wide <- big_df2 %>%
@@ -200,21 +351,21 @@ df_wide <- big_df2 %>%
 
 head(df_wide)
 
-write.csv(df_wide, 'EGF+ correlations/EGF_score_correlations_wide.csv')
+write.csv(df_wide, 'EGF+ correlations/EGF_score_correlations_wide v2.csv')
 
 
 ##extract positive and negative genes for each cell type and run pathway analyses on
 
 pos_cor <- function(df, celltype, tau_val){
   df <- subset(df, condition == celltype)
-  df <- subset(df, df$pval < 0.05 & df$tau > tau_val)
+  df <- subset(df, df$empirical_p < 0.05 & df$tau > tau_val)
   df <- df[order(-df$tau),] 
   return(df)
 }
 
 neg_cor <- function(df, celltype, tau_val){
   df <- subset(df, condition == celltype)
-  df <- subset(df, df$pval< 0.05 & df$tau < tau_val)
+  df <- subset(df, df$empirical_p< 0.05 & df$tau < tau_val)
   df <- df[order(df$tau),] 
   return(df)
 }
@@ -686,6 +837,62 @@ ordered_samples <- rownames(tab)[order(tab$EGF_Score)]
    create.dir = FALSE
  )
  
+ 
+ normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.EC.csv", row.names = 1)
+ genes <- c(EC_BP_pos$hits[1])
+ genes <- strsplit(genes, ",\\s*")
+ genes <- unlist(genes)
+ genes <- gsub(' ', '', genes)
+ 
+ 
+ #data_mod <- normalized_counts[rownames(normalized_counts) %in% genes, ]
+ 
+ sig_norm <- data.frame(normalized_counts) %>%
+   rownames_to_column(var = "gene") %>%
+   dplyr::filter(gene %in% genes)
+ 
+ 
+ sig_norm2 <- sig_norm %>% remove_rownames %>% column_to_rownames('gene')
+ df_ordered <- sig_norm2[, ordered_samples]
+ 
+ reversed_colors <- rev(hcl.colors(50, palette = "PiYg"))
+ 
+ 
+ plot5 <- pheatmap::pheatmap(df_ordered , 
+                             hcl.colors(50, 'PiYg'),
+                             cluster_rows = T, 
+                             cluster_cols = F,
+                             show_rownames = T,
+                             show_colnames = F,
+                             annotation = tab2,
+                             annotation_colors = ann_colors,
+                             border_color = NA, 
+                             fontsize = 10, 
+                             scale = "row", 
+                             fontsize_row = 8, 
+                             height = 20) 
+ 
+ plot5
+ 
+ 
+ 
+ ggsave(
+   filename = "Figures/Viral_process_EC_EGF_score_geneheatmap.v2.pdf",
+   plot = plot5,
+   device = pdf,
+   path = NULL,
+   scale = 1,
+   width = 15,
+   height = 18,
+   units = c("cm"),
+   dpi = 600,
+   limitsize = TRUE,
+   bg = NULL,
+   create.dir = FALSE
+ )
+ 
+ 
+ 
  ##make interesting heatmap 
  normalized_counts <- read.csv("GroupDegs/Pseudobulk DEG/normalized.counts.MYH7B.csv", row.names = 1)
  genes <- c(MYH7B_BP_neg$hits[1])
@@ -710,7 +917,7 @@ ordered_samples <- rownames(tab)[order(tab$EGF_Score)]
  reversed_colors <- rev(hcl.colors(50, palette = "PiYg"))
  
  
- plot5 <- pheatmap::pheatmap(df_ordered , 
+ plot6 <- pheatmap::pheatmap(df_ordered , 
                              hcl.colors(50, 'PiYg'),
                              cluster_rows = T, 
                              cluster_cols = F,
@@ -724,7 +931,7 @@ ordered_samples <- rownames(tab)[order(tab$EGF_Score)]
                              fontsize_row = 10, 
                              height = 20) 
  
- plot5
+ plot6
  
  
  
@@ -751,78 +958,245 @@ ordered_samples <- rownames(tab)[order(tab$EGF_Score)]
 ####repeat correlation analyses for myeloid and lymphoid cells
  
  # Path to folder
- folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Points/Data/Immune sub clustering/"
+ folder <- "~/Library/CloudStorage/OneDrive-AdventHealth/Clinical Studies Projects/Points/Data/Immune sub clustering/"
  
- 
- # List all CSVs that start with "normalized.counts"
- files <- list.files(folder, pattern = "^normalized\\.counts.*\\.csv$", full.names = TRUE)
+ # List all pseudobulk count files
+ files <- list.files(
+   folder,
+   pattern = "^normalized\\.counts.*\\.csv$",
+   full.names = TRUE
+ )
  
  all_results <- vector("list", length(files))
  names(all_results) <- basename(files)
  
+ # Number of permutations
+ n_permutations <- 1000
+ 
+ # Optional: makes permutations reproducible
+ set.seed(123)
+ 
  for (i in seq_along(files)) {
+   
    f <- files[i]
    message("Processing: ", f)
    
-   # --- Parse condition safely: remove prefix and .csv suffix
+   # Get cell-type name from filename
+   
    stem <- basename(f)
    stem_no_ext <- sub("\\.csv$", "", stem, ignore.case = TRUE)
-   # remove "normalized.counts." at the start if present
-   condition <- sub("^normalized\\.counts\\.", "", stem_no_ext, ignore.case = TRUE)
-   # if nothing changed, fall back to stem without extension
-   if (identical(condition, stem_no_ext) || nchar(condition) == 0) condition <- stem_no_ext
    
-   # --- Read counts (keep column names as-is)
-   normalized_counts <- read.csv(f, row.names = 1, check.names = FALSE)
+   condition <- sub(
+     "^normalized\\.counts\\.",
+     "",
+     stem_no_ext,
+     ignore.case = TRUE
+   )
    
-   # --- Align proportions to columns
-   tab_sub <- tab[match(colnames(normalized_counts), tab$SampleID), , drop = FALSE]
+   
+   # Read pseudobulk expression
+   
+   normalized_counts <- read.csv(
+     f,
+     row.names = 1,
+     check.names = FALSE
+   )
+   
+   # Align EGF score/proportion to expression matrix columns
+   tab_sub <- tab[
+     match(colnames(normalized_counts), as.character(tab$SampleID)),
+     ,
+     drop = FALSE
+   ]
+   
    prop_vec <- tab_sub$EGF_Score
    
-   # --- Optional: drop samples with missing Prop
+   # Remove samples missing EGF score
    keep <- which(!is.na(prop_vec))
+   
    if (length(keep) < 3L) {
-     warning("Too few samples with non-NA Prop for ", condition, " — skipping.")
+     warning(
+       "Too few samples with non-NA EGF_Score for ",
+       condition,
+       " — skipping."
+     )
      next
    }
-   prop_vec <- prop_vec[keep]
-   expr_mat <- as.matrix(normalized_counts[, keep, drop = FALSE])
    
-   # --- Kendall correlation row-wise (drop any NAs per gene)
+   prop_vec <- prop_vec[keep]
+   
+   expr_mat <- as.matrix(
+     normalized_counts[, keep, drop = FALSE]
+   )
+   
+   
+   # Observed Kendall correlation
+   
    kendall_tau <- apply(expr_mat, 1, function(g) {
+     
      ok <- complete.cases(g, prop_vec)
-     if (sum(ok) < 3L) return(NA_real_)
-     suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$estimate)
+     
+     if (sum(ok) < 3L)
+       return(NA_real_)
+     
+     suppressWarnings(
+       cor.test(
+         g[ok],
+         prop_vec[ok],
+         method = "kendall"
+       )$estimate
+     )
    })
    
    kendall_p <- apply(expr_mat, 1, function(g) {
+     
      ok <- complete.cases(g, prop_vec)
-     if (sum(ok) < 3L) return(NA_real_)
-     suppressWarnings(cor.test(g[ok], prop_vec[ok], method = "kendall")$p.value)
+     
+     if (sum(ok) < 3L)
+       return(NA_real_)
+     
+     suppressWarnings(
+       cor.test(
+         g[ok],
+         prop_vec[ok],
+         method = "kendall"
+       )$p.value
+     )
    })
+   
+   
+   # Initial results
    
    df <- tibble(
      gene = rownames(expr_mat),
-     tau  = as.numeric(kendall_tau),
+     tau = as.numeric(kendall_tau),
      pval = as.numeric(kendall_p)
-   ) |>
-     mutate(padj = p.adjust(pval, method = "BH"),
-            condition = condition) |>
+   )
+   
+   
+   # Only calculate empirical p-values for nominal P < 0.05
+   
+   sig_idx <- which(!is.na(df$pval) & df$pval < 0.05)
+   
+   # Initialize empirical p-value column
+   empirical_p <- rep(NA_real_, nrow(df))
+   
+   if (length(sig_idx) > 0) {
+     
+     message(
+       "  Running permutations for ",
+       length(sig_idx),
+       " genes in ",
+       condition
+     )
+     
+     # Only keep significant genes for permutation
+     sig_expr <- expr_mat[sig_idx, , drop = FALSE]
+     
+     observed_tau <- df$tau[sig_idx]
+     
+     # Matrix:
+     # rows = permutations
+     # columns = genes
+     permuted_correlations <- matrix(
+       NA_real_,
+       nrow = n_permutations,
+       ncol = nrow(sig_expr)
+     )
+     
+     
+     # Permutations
+     
+     for (p in seq_len(n_permutations)) {
+       
+       permuted_prop <- sample(prop_vec)
+       
+       permuted_correlations[p, ] <- apply(
+         sig_expr,
+         1,
+         function(g) {
+           
+           ok <- complete.cases(g, permuted_prop)
+           
+           if (sum(ok) < 3L)
+             return(NA_real_)
+           
+           suppressWarnings(
+             cor(
+               g[ok],
+               permuted_prop[ok],
+               method = "kendall"
+             )
+           )
+         }
+       )
+     }
+     
+     
+     # Empirical two-sided p-values
+     
+     empirical_p_sig <- sapply(
+       seq_along(observed_tau),
+       function(j) {
+         
+         perm_tau <- permuted_correlations[, j]
+         
+         perm_tau <- perm_tau[!is.na(perm_tau)]
+         
+         if (length(perm_tau) == 0)
+           return(NA_real_)
+         
+         # +1 correction prevents P = 0
+         (
+           sum(abs(perm_tau) >= abs(observed_tau[j])) + 1
+         ) /
+           (
+             length(perm_tau) + 1
+           )
+       }
+     )
+     
+     empirical_p[sig_idx] <- empirical_p_sig
+   }
+   
+   # Add empirical p-values and multiple-testing corrections
+   
+   df <- df %>%
+     mutate(
+       empirical_p = empirical_p,
+       
+       # FDR based on nominal Kendall p-values
+       padj = p.adjust(
+         pval,
+         method = "BH"
+       ),
+       
+       # Optional empirical FDR
+       empirical_padj = p.adjust(
+         empirical_p,
+         method = "BH"
+       ),
+       
+       condition = condition
+     ) %>%
      arrange(desc(abs(tau)))
    
    all_results[[i]] <- df
  }
  
- # Combine into one big data frame
- big_df <- bind_rows(all_results) |>
+ # Combine all cell types
+ 
+ big_df <- bind_rows(all_results) %>%
    relocate(condition, .after = gene)
+ 
+ head(big_df)
  
  # Quick sanity checks
  message("Parsed conditions: ", paste(sort(unique(big_df$condition)), collapse = ", "))
  print(head(big_df, 10))
  
  write.csv(big_df, 'EGF+ correlations/EGFscore_correlations_immune_resolution.csv')
- big_df2 <- subset(big_df, pval < 0.05)
+ big_df2 <- subset(big_df, empirical_p < 0.05)
  big_df2 <- big_df2[, 1:3]
  
  df_wide <- big_df2 %>%
@@ -839,14 +1213,14 @@ ordered_samples <- rownames(tab)[order(tab$EGF_Score)]
  
  pos_cor <- function(df, celltype, tau_val){
    df <- subset(df, condition == celltype)
-   df <- subset(df, df$pval < 0.05 & df$tau > tau_val)
+   df <- subset(df, df$empirical_p < 0.05 & df$tau > tau_val)
    df <- df[order(-df$tau),] 
    return(df)
  }
  
  neg_cor <- function(df, celltype, tau_val){
    df <- subset(df, condition == celltype)
-   df <- subset(df, df$pval< 0.05 & df$tau < tau_val)
+   df <- subset(df, df$empirical_p< 0.05 & df$tau < tau_val)
    df <- df[order(df$tau),] 
    return(df)
  }
