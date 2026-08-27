@@ -1,24 +1,17 @@
 
 ####Integration comparisons
 ## Load libraries
-library(SingleCellExperiment) 
-library(simpleSingleCell) 
-library(Seurat) 
-library(scran) 
-library(scuttle)
+library(Seurat)
 library(dplyr)
-library(tidyverse)
 library(ggplot2)
-library(gridExtra)
-library(ggpubr)
 library(RColorBrewer)
-library("patchwork")
+library(patchwork)
 library(STACAS)
 library(SeuratWrappers)
 library(harmony)
-library(pdfCluster)
 library(lisi)
-library(kBET)
+library(pdfCluster)
+library(grid)
 
 ###Set working directory to where you want your files saving. 
 ##Recommend to link this to onedrive if you are logged in 
