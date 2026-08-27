@@ -1,25 +1,18 @@
 
-##This code explains who signautre matrix was generated from the snRNA-seq muscle data and the algorithm used to deconvolute a publicly available dataset.
+##This code explains how the signautre matrix was generated from the snRNA-seq muscle data and the algorithm used to deconvolute a publicly available dataset.
 
-library(Seurat)
-library(ggplot2)
-library(usethis)
+llibrary(Seurat)
 library(dplyr)
-library(readr)
-library(tidyverse)
-library(WGCNA)
-library(granulator)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(ggplot2)
 library(edgeR)
-library(lme4)
-library(lmerTest)  
-library(emmeans)
-library(ggpubr)
+library(granulator)
 library(rstatix)
-library(corrplot)
-library(car)
-library(Hmisc)
 library(plotrix)
-setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Points/deconvolution")
+
+setwd("~/Library/CloudStorage/OneDrive-AdventHealth/Clincial Studies/Projects/Points/deconvolution")
 
 
 my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black"),
@@ -32,7 +25,7 @@ my_theme <- theme_classic() + theme(text = element_text(size=10, colour = "black
 
 ##Load functions
 Convert_To_ENSG2 <- function(df) {
-  gene_info <- read.csv("~/Library/CloudStorage/OneDrive-AdventHealth/Points/deconvolution/gene_info_incl_introns.csv")
+  gene_info <- read.csv("~/Library/CloudStorage/OneDrive-AdventHealth/Clincial Studies Projects/Points/deconvolution/gene_info_incl_introns.csv")
   gene_info <- gene_info %>%
     dplyr::select(2, 3)  ##subset to only relevant columns
   df <- dplyr::left_join(df, gene_info, by = c("Gene_Name"))
@@ -66,7 +59,7 @@ remove_duplicate_genes<-function(eset, column_of_symbol, method = "mean"){
 }
 
 Convert_To_ENSG <- function(df) {
-  gene_info <- read.csv("~/Library/CloudStorage/OneDrive-AdventHealth/Points/deconvolution/gene_info_incl_introns.csv")
+  gene_info <- read.csv("~/Library/CloudStorage/OneDrive-AdventHealth/Clincial Studies Projects/Points/deconvolution/gene_info_incl_introns.csv")
   gene_info <- gene_info %>%
     dplyr::select(2, 3)  ##subset to only relevant columns
   df$Gene_Name <- rownames(df)
