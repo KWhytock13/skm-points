@@ -236,9 +236,9 @@ for (cluster_name in names(dds_list)) {
     file.path(outdir, paste0("normalized_", cluster_name, ".csv"))
   )
   
-  # ---------------------------
+ 
   # Run DESeq
-  # ---------------------------
+
   dds <- DESeq(dds)
   
   # Check group levels
@@ -273,9 +273,9 @@ for (cluster_name in names(dds_list)) {
   res_tbl2 <- as.data.frame(res2) %>%
     rownames_to_column("gene")
   
-  # ---------------------------
+
   # Save results
-  # ---------------------------
+
   write.csv(res_tbl,
             file.path(outdir, paste0(cluster_name, "_bulk_group.csv")),
             row.names = FALSE)
@@ -455,9 +455,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   
   message("Running ORA for: ", cluster_name)
   
-  # ---------------------------
+
   # Load DEG results
-  # ---------------------------
+
   
   file_path <- file.path(deg_dir,
                          paste0(cluster_name, "_bulk_group.csv"))
@@ -472,10 +472,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   # Background genes
   background_genes <- rownames(deg)
   
-  # ---------------------------
+
   # Define significant gene lists
-  # ---------------------------
-  
+
   deg$gene <- rownames(deg)
   
   up_genes <- deg %>%
@@ -491,9 +490,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
     return(NULL)
   }
   
-  # ---------------------------
+
   # Filter Gene Sets by Background
-  # ---------------------------
+ 
   
   geneSetsFilt <- filterSets(
     x = geneSets,
@@ -513,9 +512,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
     return(NULL)
   }
   
-  # ---------------------------
+
   # Cluster Similar Sets
-  # ---------------------------
+
   
   clusterDF <- clusterSets(
     x = geneSetsFilt,
@@ -539,9 +538,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   
   geneSetsFilt <- geneSetsFilt[keepSets]
   
-  # ---------------------------
+
   # Run ORA
-  # ---------------------------
+ 
   
   if(length(up_genes) >= 10){
     M_up <- hypeR(
