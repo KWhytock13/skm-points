@@ -1,30 +1,19 @@
 ###Points pseudobulk analysis
 library(Seurat)
-library(Matrix.utils)
-library(edgeR)
-library(dplyr)
-library(magrittr)
-library(Matrix)
-library(purrr)
-library(reshape2)
-library(S4Vectors)
-library(tibble)
 library(SingleCellExperiment)
-library(pheatmap)
-library(apeglm)
-library(png)
+library(Matrix.utils)
 library(DESeq2)
-library(RColorBrewer)
-library(TMSig)
-library(fgsea)
-library(data.table)
-library(plotrix)
-library(hypeR)
+library(apeglm)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(magrittr)
+library(ggplot2)
 library(ComplexHeatmap)
-library(UpSetR)
-library(ggpubr)
-library(readxl)
-library(tools)
+library(fgsea)
+library(TMSig)
+library(hypeR)
 
 ###Pseudbulk DEG initially performed without covariates. Normalized counts data were then used for subsequent analyses e.g. kendall correlation. 
 
@@ -433,9 +422,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   
   message("Running ORA for: ", cluster_name)
   
-  # ---------------------------
+
   # Load DEG results
-  # ---------------------------
+
   
   file_path <- file.path(deg_dir,
                          paste0(cluster_name, "_bulk_group.csv"))
@@ -450,9 +439,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   # Background genes
   background_genes <- rownames(deg)
   
-  # ---------------------------
+
   # Define significant gene lists
-  # ---------------------------
+
   
   deg$gene <- rownames(deg)
   
@@ -469,9 +458,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
     return(NULL)
   }
   
-  # ---------------------------
+
   # Filter Gene Sets by Background
-  # ---------------------------
+
   
   geneSetsFilt <- filterSets(
     x = geneSets,
@@ -491,9 +480,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
     return(NULL)
   }
   
-  # ---------------------------
+
   # Cluster Similar Sets
-  # ---------------------------
+
   
   clusterDF <- clusterSets(
     x = geneSetsFilt,
@@ -517,9 +506,9 @@ run_tmSig_ORA <- function(cluster_name, deg_dir){
   
   geneSetsFilt <- geneSetsFilt[keepSets]
   
-  # ---------------------------
+
   # Run ORA
-  # ---------------------------
+
   
   if(length(up_genes) >= 10){
     M_up <- hypeR(
